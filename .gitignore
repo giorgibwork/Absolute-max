@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Archives (zip already extracted; keep repo clean of large bins)
+*.zip
+*.tar.gz
+*.tar
+*.rar
+
+# Research working files (keep final reports; ignore intermediate scrapes)
+research/tmp/
+research/raw/
+
+# Logs
+*.log

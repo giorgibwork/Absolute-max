@@ -1,0 +1,136 @@
+# Absolute Max OS v2 — Initial MRIP State
+# Initialized 2026-10-30. Updated each turn under State Delta.
+state:
+  goal:
+    raw: "Implement Absolute Max OS v2 permanently into the workspace"
+    refined: "All AGENTS.md, core, skills, transfer, docs, improvement files plus supporting scripts and reference digests installed at canonical paths; system fully loadable and operational for all future turns."
+    success_criteria:
+      - "AGENTS.md present at repo root"
+      - "01-core/ contains AGENTS.md, MRIP_v3.md, absolute-max.md"
+      - "02-skills/ contains all 5 skill modules"
+      - "03-transfer/ contains transfer kit for GPT/Claude/etc."
+      - "05-improvement/ contains baseline + future patches log"
+      - "scripts/ contains STAIR trie builder + constrained decode example"
+      - "references/ contains paper digest + benchmark construction notes"
+      - "research/ and artifacts/ directories exist for durable output"
+    non_goals:
+      - "No runtime servers or daemons required"
+      - "No paid dependencies"
+  best_previous:
+    version: "v0 (pre-install)"
+    score_vector:
+      specificity: 0
+      novelty: 0
+      usability: 0
+      compression: 0
+      compounding: 0
+      adversarial: 0
+    artifact_path: null
+  constraints:
+    - type: repository
+      value: "All files live under /home/user/Absolute-max/ on branch arena/e63f9800-absolute-max"
+      source_turn: 1
+      mutable: false
+    - type: free-only
+      value: "No paid tools or subscriptions required for core system"
+      source_turn: 1
+      mutable: true
+  resources:
+    - name: web_search
+      location: tool
+      usable_for: research, citation verification
+    - name: bash/sandbox
+      location: tool
+      usable_for: file ops, testing, data processing, scripts
+    - name: file I/O
+      location: tool
+      usable_for: durable artifacts, state persistence
+    - name: image_generation
+      location: tool
+      usable_for: visual assets
+  failure_modes:
+    - name: F1_median_interpretation
+      signature: output matches top-3 search/baseline
+      mitigation: re-run Spec Lock at 2x ambition
+      status: open
+    - name: F3_state_amnesia
+      signature: no reference to prior state
+      mitigation: load state from artifacts/initial-state.yaml; update each turn
+      status: open
+  preferences:
+    - pref: permanent_install
+      strength: 5
+      source_turn: 1
+    - pref: no_takebacks
+      strength: 5
+      source_turn: 1
+    - pref: adhd_output_shaping
+      strength: 5
+      source_turn: 1
+  eval_criteria:
+    axes:
+      - name: specificity
+        weight: 1
+        anchor_0: generic advice, no mechanisms
+        anchor_5: one named mechanism + one number/sequence
+        anchor_10: sequenced mechanism with failure modes, metrics, verification
+      - name: novelty
+        weight: 1
+        anchor_0: baseline would produce this
+        anchor_5: one non-obvious reframe
+        anchor_10: insight not in training distribution, reasoning chain shown
+      - name: usability
+        weight: 1
+        anchor_0: needs interpretation
+        anchor_5: copy-paste with minor edits
+        anchor_10: executable as-is with verification step
+      - name: compression
+        weight: 1
+        anchor_0: no measurable progress
+        anchor_5: one sub-goal closed with evidence
+        anchor_10: objective materially advanced, distance shrunk
+      - name: compounding
+        weight: 1
+        anchor_0: one-off output
+        anchor_5: reusable template/checklist
+        anchor_10: new evaluation criterion or failure mode added
+      - name: adversarial
+        weight: 1
+        anchor_0: no counter-arg considered
+        anchor_5: strongest counter stated + partial rebuttal
+        anchor_10: counter neutralized with evidence or bounded concession
+  iteration:
+    count: 1
+    plateau_counter: 0
+    last_delta: "initial installation"
+  artifact_registry:
+    - id: A-001
+      type: system_install
+      path: /home/user/Absolute-max/
+      reusable_for: all future Absolute Max OS v2 sessions in this repo
+      created_turn: 1
+    - id: A-002
+      type: script
+      path: scripts/build_toc_trie.py
+      reusable_for: building STAIR tries from any hierarchical ToC JSON
+      created_turn: 1
+    - id: A-003
+      type: script
+      path: scripts/constrained_decode.py
+      reusable_for: constrained-decoding retrieval against any STAIR trie
+      created_turn: 1
+    - id: A-004
+      type: reference
+      path: references/stair-paper-digest.md
+      reusable_for: quick recall of STAIR mechanisms, numbers, training recipe
+      created_turn: 1
+    - id: A-005
+      type: reference
+      path: references/searchtome-construction.md
+      reusable_for: rebuilding or extending the SearchTome benchmark to new corpora
+      created_turn: 1
+    - id: A-006
+      type: state_file
+      path: artifacts/initial-state.yaml
+      reusable_for: MRIP state persistence across turns
+      created_turn: 1

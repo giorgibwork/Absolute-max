@@ -1,0 +1,13 @@
+═══════════════════════════════════════════════
+  ABSOLUTE MAX OS v2 — LOAD INSTRUCTIONS
+═══════════════════════════════════════════════
+
+1. Load AGENTS.md FIRST (this is the master configuration)
+2. Then load 01-core/MRIP_v3.md and 01-core/absolute-max.md
+3. Use skills from 02-skills/ as needed
+
+AGENTS.md = single source of truth.
+Everything else is subordinate.
+
+Full structure and rules are in README.md and AGENTS.md.
+═══════════════════════════════════════════════
