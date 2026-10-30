@@ -1,0 +1,70 @@
+# HyperOS Reverse Engineering & Optimization Toolkit
+# Device: Poco F6 Pro (vermeer) | Snapdragon 8 Gen 2
+# Build: HyperOS 3.0.302.0.WNKRUXM.C09 (Android 16, Russia)
+# Runtime: Termux + Shizuku/ladb | uid 2000 (shell), NO ROOT
+#
+# WARNING: No-root shell access has hard limits.
+#   READABLE : /proc, /sys, props, dumpsys, pm path, app APKs (via copy)
+#   NOT READ : /data/app, /system/framework, /vendor/lib64 directly
+#   WRITE    : runtime props (setprop), appops, deviceidle, disable-user,
+#              sysfs governors (only if the node is writable at uid 2000)
+#   PERSIST  : props do NOT survive reboot without root / resetprop.
+#              Rollback snapshots are stored under state/snapshots/.
+
+device:
+  codename: vermeer
+  model: poco f6 pro
+  chipset: snapdragon 8 gen 2 (sm8550)
+  android: 16
+  miui_hyperos: 3.0.302.0.WNKRUXM.C09
+  region: russia
+  build_type: user
+  partitions: dynamic (super), A/B slots
+  uid: 2000 (shell)
+  root: false
+
+paths:
+  workdir: /data/local/tmp/hyperos_re
+  apks: /data/local/tmp/hyperos_re/apks
+  frameworks: /data/local/tmp/hyperos_re/frameworks
+  reports: /data/local/tmp/hyperos_re/reports
+  snapshots: /data/local/tmp/hyperos_re/snapshots
+  state: /data/local/tmp/hyperos_re/state
+  log: /data/local/tmp/hyperos_re/state/hyperos_re.log
+
+command:
+  # Prefix for every shell call. Use 'ladb shell' from PC or 'shizuku -c' on-device.
+  # Set HYPEROS_RE_CMD_PREFIX env var to override.
+  prefix: "${HYPEROS_RE_CMD_PREFIX:-shizuku -c}"
+  timeout_s: 30
+  retries: 3
+
+# System properties safe to tune at runtime (uid 2000, no root).
+# Values are starting points; verify per-prop before batch apply.
+props:
+  # Perf
+  debug.performance.tuning: "1"
+  vendor.perf.ioplug.enable: "1"
+  # Battery / idle
+  pm.sleep_mode: "1"
+  # Thermal (conservative defaults; test individually)
+  vendor.thermal.config: "0"
+
+# Packages safe to disable for the current user (no root, reversible via enable).
+# Review each before enabling. Do NOT disable system-critical packages.
+disable_candidates:
+  - com.miui.analytics
+  - com.miui.msa.global
+  - com.google.android.gms.ads
+  - com.facebook.analytics
+  - com.facebook.appmanager
+  - com.facebook.system
+
+# AppOps to restrict (battery/perf wins). Format: <op> <package> <mode>
+# mode: ALLOW / DENY / IGNORE / DEFAULT
+appops:
+  - [OP_MONETIZE, com.miui.analytics, DENY]
+  - [OP_CAMERA, com.miui.analytics, DENY]
+
+# CPU governor preference (applied only if sysfs node writable at uid 2000).
+cpu_governor: "schedutil"
