@@ -346,6 +346,44 @@ def _corpus_conn(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+def query_local_corpus(topic: str, *, db_path: str | None = None, top_k: int = 8) -> dict[str, Any]:
+    """<5ms local SQLite FTS5 BM25 query against already-crawled bulk pages (0 network, 0 LLM tokens)."""
+    t0 = time.monotonic()
+    db = db_path or os.path.expanduser("~/.antigem/memory/omega_corpus.db")
+    if not os.path.isfile(db):
+        return {"topic": topic, "db_path": db, "total_docs_in_db": 0, "elapsed_ms": 0.0, "top_hits": []}
+    anchor = extract_anchor_terms(topic, max_terms=4)
+    kw = " OR ".join(re.findall(r"[A-Za-z0-9_]{3,}", anchor)) or anchor
+    conn = _corpus_conn(db)
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+        try:
+            rows = conn.execute(
+                """
+                SELECT d.url, d.source, d.title, d.published, substr(d.text, 1, 180)
+                FROM docs_fts f JOIN docs d ON d.id = f.rowid
+                WHERE docs_fts MATCH ?
+                ORDER BY bm25(docs_fts) LIMIT ?
+                """,
+                (kw, top_k),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = conn.execute(
+                "SELECT url, source, title, published, substr(text, 1, 180) FROM docs ORDER BY fetched_at DESC LIMIT ?",
+                (top_k,),
+            ).fetchall()
+    finally:
+        conn.close()
+    return {
+        "topic": topic,
+        "db_path": db,
+        "total_docs_in_db": total,
+        "elapsed_ms": round((time.monotonic() - t0) * 1000.0, 2),
+        "llm_tokens_used": 0,
+        "top_hits": [{"url": r[0], "source": r[1], "title": r[2][:120], "published": r[3], "snippet": r[4]} for r in rows],
+    }
+
+
 def bulk_crawl(
     topic: str,
     *,
@@ -353,28 +391,29 @@ def bulk_crawl(
     db_path: str | None = None,
     max_workers: int = 16,
     follow_bfs_pages: int = 80,
+    top_k: int = 8,
 ) -> dict[str, Any]:
-    """Pull up to 500+ public docs into local SQLite FTS5 at $0.00 and 0 LLM tokens, then return top BM25 hits."""
+    """Pull up to 500+ public docs into local SQLite FTS5 at $0.00 and 0 LLM tokens, then return compact top BM25 hits."""
     t0 = time.monotonic()
     db = db_path or os.path.expanduser("~/.antigem/memory/omega_corpus.db")
     anchor = extract_anchor_terms(topic, max_terms=3)
     zh_q = expand_chinese_query(topic)
 
-    # 1. High-yield parallel multi-index seed discovery (EN + CN + Academic + GitHub + HN + DDGS)
+    # 1. High-yield parallel multi-index seed discovery (EN + CN + Academic + GitHub + HN + DDG/Wiki)
     rows: list[dict[str, str]] = []
     seed_urls: list[str] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
         futs = [
-            ex.submit(discover_ddgs, topic, 30),
-            ex.submit(discover_ddgs, zh_q, 25),
-            ex.submit(_discover_arxiv, topic, min(150, target_pages // 2)),
-            ex.submit(_discover_openalex, topic, 50),
-            ex.submit(_discover_hn_stories, anchor, False, 50),
-            ex.submit(_discover_hn_comments, anchor, 50),
-            ex.submit(_discover_github_repos, anchor, False, 30),
-            ex.submit(_discover_github_repos, topic, True, 25),
-            ex.submit(_discover_github_issues, anchor, 30),
-            ex.submit(_discover_stackexchange, anchor, 25),
+            ex.submit(discover_ddgs, topic, 40),
+            ex.submit(discover_ddgs, zh_q, 30),
+            ex.submit(_discover_arxiv, topic, min(200, max(60, target_pages // 2))),
+            ex.submit(_discover_openalex, topic, min(80, max(30, target_pages // 5))),
+            ex.submit(_discover_hn_stories, anchor, False, 80),
+            ex.submit(_discover_hn_comments, anchor, 80),
+            ex.submit(_discover_github_repos, anchor, False, 50),
+            ex.submit(_discover_github_repos, topic, True, 35),
+            ex.submit(_discover_github_issues, anchor, 40),
+            ex.submit(_discover_stackexchange, anchor, 35),
         ]
         for f in futs:
             try:
@@ -458,21 +497,22 @@ def bulk_crawl(
         conn.commit()
         total_in_db = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
 
-        # Return compact top-12 BM25 hits (<4KB) so the LLM reads high-signal proof with 90% fewer tokens!
+        # Return ultra-compact top_k BM25 hits (<2.5KB) so the LLM reads high-signal proof with near-zero token overhead!
         kw = " OR ".join(re.findall(r"[A-Za-z0-9_]{3,}", anchor)) or anchor
         try:
             top = conn.execute(
                 """
-                SELECT d.url, d.source, d.title, d.published, substr(d.text, 1, 260)
+                SELECT d.url, d.source, d.title, d.published, substr(d.text, 1, 180)
                 FROM docs_fts f JOIN docs d ON d.id = f.rowid
                 WHERE docs_fts MATCH ?
-                ORDER BY bm25(docs_fts) LIMIT 12
+                ORDER BY bm25(docs_fts) LIMIT ?
                 """,
-                (kw,),
+                (kw, top_k),
             ).fetchall()
         except sqlite3.OperationalError:
             top = conn.execute(
-                "SELECT url, source, title, published, substr(text, 1, 260) FROM docs ORDER BY fetched_at DESC LIMIT 12"
+                "SELECT url, source, title, published, substr(text, 1, 180) FROM docs ORDER BY fetched_at DESC LIMIT ?",
+                (top_k,),
             ).fetchall()
     finally:
         conn.close()
@@ -487,7 +527,7 @@ def bulk_crawl(
         "total_docs_in_db": total_in_db,
         "elapsed_s": round(time.monotonic() - t0, 2),
         "llm_tokens_used": 0,
-        "top_hits": [{"url": r[0], "source": r[1], "title": r[2], "published": r[3], "snippet": r[4]} for r in top],
+        "top_hits": [{"url": r[0], "source": r[1], "title": r[2][:120], "published": r[3], "snippet": r[4]} for r in top],
     }
 
 

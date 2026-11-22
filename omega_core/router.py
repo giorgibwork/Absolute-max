@@ -32,7 +32,7 @@ JIT_SYNONYMS: list[tuple[re.Pattern[str], str]] = [
 JIT_STOP = {"the", "and", "for", "with", "what", "how", "can", "you", "our", "this", "that", "from", "have", "about", "just", "make", "need", "want"}
 
 HANDOFF_RX = re.compile(r"\b(?:handoff|wrap\s+up\s+for\s+new\s+chat|session\s+handoff|prepare\s+new\s+chat)\b", re.IGNORECASE)
-CRAWL_RX = re.compile(r"\b(?:scrape\s+\d+|bulk\s+crawl|crawl\s+500|mass\s+scrape|500\+\s+pages)\b", re.IGNORECASE)
+CRAWL_RX = re.compile(r"\b(?:scrape|crawl|bulk\s+crawl|mass\s+scrape|500\+\s+pages|youtube\s+transcript|transcript\s+of)\b", re.IGNORECASE)
 
 DEEP_RESEARCH_RX = re.compile(
     r"\b(?:deep\s+research|dig\s+deep|full\s+breakdown|investigate\s+deeply|maximize|optimize|absolute\s+ceiling|eye\s+of\s+god|research\s+everything|comprehensive\s+research)\b",
@@ -92,10 +92,8 @@ def classify_user_intent(user_input: str) -> list[dict[str, str]]:
             {
                 "intent": "DEEP_RESEARCH",
                 "directive": (
-                    "[Omega Intent -> DEEP Research] User asked for deep research/optimization in natural language. "
-                    "Run live web grounding FIRST (search_web + ~/tools/web_gather.py + omega research --mode DEEP if useful), "
-                    "challenge with a cross-family model (claude_gpt pool), pass non_consensus_gate, and reply in plain English. "
-                    "Do NOT tell the user to type CLI commands."
+                    "[Omega->DEEP Bulk] Run `omega crawl \"<topic>\" --pages 500` FIRST (0 LLM tokens, trafilatura+scrapling->SQLite FTS5), "
+                    "pass non_consensus_gate, reply in plain English. Never dump CLI flags."
                 ),
             }
         )
@@ -104,9 +102,8 @@ def classify_user_intent(user_input: str) -> list[dict[str, str]]:
             {
                 "intent": "FAST_RESEARCH",
                 "directive": (
-                    "[Omega Intent -> FAST Research] User wants fresh/factual info. "
-                    "Ground with live web search (search_web / omega research --mode FAST) before answering — never rely on stale training weights. "
-                    "Verify material claims once, stop when sufficient, and reply in plain English without asking the user to run CLI commands."
+                    "[Omega->FAST Bulk] Run `omega crawl \"<topic>\" --pages 250 --bfs 30` (0 LLM tokens, local FTS5) "
+                    "instead of repeated search_web turns. Reply in plain English."
                 ),
             }
         )
@@ -212,7 +209,7 @@ def classify_user_intent(user_input: str) -> list[dict[str, str]]:
     return routes
 
 
-def jit_hydrate_memories(user_input: str, paths: OmegaPaths, max_chars: int = 1200) -> str:
+def jit_hydrate_memories(user_input: str, paths: OmegaPaths, max_chars: int = 900) -> str:
     """Zero-tool-call Pre-Turn JIT Context Hydration (JitMem + HiGram pattern)."""
     if len(user_input.strip()) < 5:
         return ""
@@ -235,7 +232,7 @@ def jit_hydrate_memories(user_input: str, paths: OmegaPaths, max_chars: int = 12
     lines = ["<jit_hydrated_context>"]
     used = len(lines[0]) + len("</jit_hydrated_context>") + 2
     for h in hits:
-        entry = f"- [{h['key']}|hop={h.get('match_hop', 0)}] {h['text'].replace(chr(10), ' ')[:360]}"
+        entry = f"- [{h['key']}|h{h.get('match_hop', 0)}] {h['text'].replace(chr(10), ' ')[:270]}"
         if used + len(entry) + 1 > max_chars:
             break
         lines.append(entry)

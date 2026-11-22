@@ -33,7 +33,7 @@ from omega_core.kernel import evaluate_tool_call
 from omega_core.memory import KnowledgeFabric
 from omega_core.mission import MissionKernel
 from omega_core.obsidian import DEFAULT_VAULT_DIR, ObsidianSync
-from omega_core.omni import bulk_crawl, fetch_youtube_transcript, read_document
+from omega_core.omni import bulk_crawl, fetch_youtube_transcript, query_local_corpus, read_document
 from omega_core.research import ResearchEngine
 from omega_core.rtk import generate_handoff, run_compressed
 from omega_core.suite import run_suite
@@ -247,7 +247,10 @@ def cmd_mcp_mode(args) -> None:
 
 
 def cmd_crawl(args) -> None:
-    _jprint(bulk_crawl(args.topic, target_pages=args.pages, follow_bfs_pages=args.bfs, max_workers=args.workers))
+    if args.query_only:
+        _jprint(query_local_corpus(args.topic, top_k=args.top))
+    else:
+        _jprint(bulk_crawl(args.topic, target_pages=args.pages, follow_bfs_pages=args.bfs, max_workers=args.workers, top_k=args.top))
 
 
 def cmd_yt(args) -> None:
@@ -547,6 +550,8 @@ def build_parser() -> argparse.ArgumentParser:
     pcr.add_argument("--pages", type=int, default=500)
     pcr.add_argument("--bfs", type=int, default=80)
     pcr.add_argument("--workers", type=int, default=16)
+    pcr.add_argument("--top", type=int, default=8)
+    pcr.add_argument("--query-only", action="store_true", help="Query already-crawled local SQLite FTS5 corpus (<5ms, 0 network)")
     pcr.set_defaults(func=cmd_crawl)
 
     # yt (instant zero-download YouTube transcript)
