@@ -12,7 +12,7 @@
   - `OAPX-SYS-01` Constitutional Kernel (`omega_core/kernel.py`)
   - `OAPX-SYS-02` Intent Compiler (`omega_core/mission.py`)
   - `OAPX-SYS-03` Mission Kernel + Pro² Problem State (`omega_core/mission.py`)
-  - `OAPX-SYS-06` Intelligence Fabric (`omega_core/fabric.py` — 3 live models qualified)
+  - `OAPX-SYS-06` Intelligence Fabric (`omega_core/fabric.py` — 4/4 default models live-qualified)
   - `OAPX-SYS-07` Context Compiler (`omega_core/memory.py`)
   - `OAPX-SYS-08` Knowledge & Evidence Fabric — Scoped-ORC + GrepMem + Evidence (`omega_core/memory.py`)
   - `OAPX-SYS-09` Capability Gateway + Weakest-Agent Rings (`omega_core/kernel.py`)
