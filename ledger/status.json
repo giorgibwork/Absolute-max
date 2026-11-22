@@ -72,10 +72,10 @@
       "name": "Intelligence Fabric (Model Qualification & Routing)",
       "owner": "omega_core/fabric.py",
       "adapters": ["omega_core/cli.py#models"],
-      "test_refs": ["omega_core/suite.py#Mission-E", "omega models sync (23/23 live)", "omega models qualify (10/23 across all 8 families)"],
+      "test_refs": ["omega_core/suite.py#Mission-E", "omega models sync (9 base models / 23 effort endpoints)", "omega models qualify (9/9 base models QUALIFIED)"],
       "status": "QUALIFIED",
       "known_limitations": [
-        "All 23 live agy models synced into models.db across 8 families and 3 independent quota pools (Gemini, Argon, Claude+GPT). 10/23 family leaders live-qualified (all 1.0 fidelity & 1.0 injection resistance); remaining 13 effort tiers stay UNKNOWN until probed on demand to preserve 5-hour quota."
+        "All 9 unique base models live-qualified (100%, across 3 AntiGem quota pools: gemini_models, claude_gpt, gemini_argon). agy exposes those 9 base models as 23 effort-tier endpoints (low/medium/high/xhigh); 10/23 endpoints probed live, remaining duplicate effort tiers left unprobed to preserve 5-hour quota."
       ]
     },
     {

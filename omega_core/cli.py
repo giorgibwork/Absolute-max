@@ -34,14 +34,18 @@ def cmd_status(args) -> None:
     active = mk.list_missions(state="ACTIVE", limit=10)
     pending_apr = mk.list_approvals(status="PENDING")
     models = fab.list_models()
-    qualified = [m["model_id"] for m in models if m["qualification_state"] == "QUALIFIED"]
+    base_models = fab.list_base_models()
+    qualified_base = [m["base_model"] for m in base_models if m["qualification_state"] == "QUALIFIED"]
     _jprint(
         {
             "version": VERSION,
             "omega_home": paths.omega_home,
             "active_missions": len(active),
             "pending_approvals": len(pending_apr),
-            "qualified_models": qualified,
+            "base_models_total": len(base_models),
+            "base_models_qualified": len(qualified_base),
+            "effort_endpoints_total": len(models),
+            "qualified_base_models": qualified_base,
             "experiments_recorded": len(lab.list_experiments(limit=50)),
             "event_chain": mk.verify_event_chain(),
             "host_resources": fab.host_resources(),
@@ -144,7 +148,7 @@ def cmd_mem(args) -> None:
 def cmd_models(args) -> None:
     fab = IntelligenceFabric()
     if args.action == "list":
-        _jprint(fab.list_models())
+        _jprint(fab.list_base_models() if not args.variants else fab.list_models())
     elif args.action == "sync":
         _jprint(fab.sync_live_catalog())
     elif args.action == "qualify":
@@ -218,11 +222,13 @@ def cmd_dashboard(args) -> None:
     print(f"- Pending approvals: {len(approvals)}")
     for a in approvals[:5]:
         print(f"  * {a['approval_id']} [{a['action_class']}] {a['summary'][:70]}")
-    q_models = [m for m in models if m["qualification_state"] == "QUALIFIED"]
-    print(f"- Models: {len(q_models)}/{len(models)} QUALIFIED (run `omega models list` for all {len(models)})")
-    for mod in q_models:
-        lat = f"{mod['latency_ms']:.0f}ms" if mod["latency_ms"] else "untested"
-        print(f"  * {mod['model_id']} [{mod['family']}]: {mod['qualification_state']} ({lat})")
+    base_models = fab.list_base_models()
+    q_base = [m for m in base_models if m["qualification_state"] == "QUALIFIED"]
+    print(f"- Base Models: {len(q_base)}/{len(base_models)} QUALIFIED ({len(models)} effort-tier endpoints across 3 quota pools)")
+    for bm in base_models:
+        lat = f"{bm['best_latency_ms']:.0f}ms" if bm["best_latency_ms"] else "untested"
+        tiers = ",".join(bm["effort_tiers"])
+        print(f"  * {bm['base_model']} [{bm['quota_pool']}]: {bm['qualification_state']} ({lat}; tiers: {tiers})")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -321,7 +327,8 @@ def build_parser() -> argparse.ArgumentParser:
     # models
     pmod = sub.add_parser("models", help="Model qualification registry & routing")
     pmod_sub = pmod.add_subparsers(dest="action", required=True)
-    pmod_sub.add_parser("list")
+    pmod_l = pmod_sub.add_parser("list")
+    pmod_l.add_argument("--variants", action="store_true", help="Show all effort-tier endpoints instead of grouped base models")
     pmod_sub.add_parser("sync")
     pmod_q = pmod_sub.add_parser("qualify")
     pmod_q.add_argument("models", nargs="*")

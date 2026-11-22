@@ -91,6 +91,31 @@ def infer_family(model_id: str) -> str:
     return "other"
 
 
+def infer_base_model(model_id: str) -> str:
+    """Collapse effort-tier suffixes (-low/-medium/-high/-xhigh) into the real base model name."""
+    m = model_id.strip().lower()
+    if m == "gemini-pro-orchestrator-g1-pro":
+        return "orchestrator-argon"
+    if m == "gemini-pro-orchestrator-neon":
+        return "orchestrator-neon"
+    return re.sub(r"-(?:xhigh|high|medium|low)$", "", m)
+
+
+def infer_effort_tier(model_id: str) -> str:
+    m = re.search(r"-(xhigh|high|medium|low)$", model_id.strip().lower())
+    return m.group(1) if m else "default"
+
+
+def infer_quota_pool(model_id: str) -> str:
+    """Match the exact 3 AntiGem quota groups: gemini_models, claude_gpt, gemini_argon."""
+    m = model_id.lower()
+    if "claude" in m or "gpt" in m:
+        return "claude_gpt"
+    if "argon" in m or "orchestrator-g1" in m:
+        return "gemini_argon"
+    return "gemini_models"
+
+
 def discover_agy_models(timeout_s: int = 12) -> list[dict[str, str]]:
     """Query `agy models` live ($0.00, zero token burn) and return discovered model IDs + labels."""
     try:
@@ -337,10 +362,39 @@ class IntelligenceFabric:
             for r in rows:
                 d = dict(r)
                 d["roles"] = json.loads(d.pop("roles_json"))
+                d["base_model"] = infer_base_model(d["model_id"])
+                d["effort_tier"] = infer_effort_tier(d["model_id"])
+                d["quota_pool"] = infer_quota_pool(d["model_id"])
                 out.append(d)
             return out
         finally:
             conn.close()
+
+    def list_base_models(self) -> list[dict[str, Any]]:
+        """Group effort-tier variants into true distinct base models (e.g. 9 base models, 23 effort endpoints)."""
+        grouped: dict[str, dict[str, Any]] = {}
+        for m in self.list_models():
+            bm = m["base_model"]
+            entry = grouped.setdefault(
+                bm,
+                {
+                    "base_model": bm,
+                    "quota_pool": m["quota_pool"],
+                    "family": m["family"],
+                    "effort_tiers": [],
+                    "qualified_tiers": [],
+                    "best_latency_ms": None,
+                    "qualification_state": "UNKNOWN",
+                },
+            )
+            entry["effort_tiers"].append(m["effort_tier"])
+            if m["qualification_state"] == "QUALIFIED":
+                entry["qualified_tiers"].append(m["effort_tier"])
+                entry["qualification_state"] = "QUALIFIED"
+                lat = float(m["latency_ms"] or 0.0)
+                if lat > 0 and (entry["best_latency_ms"] is None or lat < entry["best_latency_ms"]):
+                    entry["best_latency_ms"] = lat
+        return sorted(grouped.values(), key=lambda x: (x["quota_pool"], x["base_model"]))
 
     def select_chain(self, task_text: str, exclude: set[str] | None = None) -> dict[str, Any]:
         """Select ordered primary + fallback model chain preferring QUALIFIED models."""

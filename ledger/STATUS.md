@@ -12,7 +12,7 @@
   - `OAPX-SYS-01` Constitutional Kernel (`omega_core/kernel.py`)
   - `OAPX-SYS-02` Intent Compiler (`omega_core/mission.py`)
   - `OAPX-SYS-03` Mission Kernel + Pro² Problem State (`omega_core/mission.py`)
-  - `OAPX-SYS-06` Intelligence Fabric (`omega_core/fabric.py` — 23/23 live models synced, 10/23 family leaders live-qualified across all 8 families & 3 quota pools)
+  - `OAPX-SYS-06` Intelligence Fabric (`omega_core/fabric.py` — 9/9 unique base models live-qualified across 3 quota pools; 23 effort-tier endpoints synced)
   - `OAPX-SYS-07` Context Compiler (`omega_core/memory.py`)
   - `OAPX-SYS-08` Knowledge & Evidence Fabric — Scoped-ORC + GrepMem + Evidence (`omega_core/memory.py`)
   - `OAPX-SYS-09` Capability Gateway + Weakest-Agent Rings (`omega_core/kernel.py`)

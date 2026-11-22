@@ -116,6 +116,15 @@ class OmegaCoreTests(unittest.TestCase):
         self.assertLess(b3, b0)
         self.assertEqual(b30, 10)
 
+    def test_base_model_grouping_and_quota_pools(self):
+        fab = IntelligenceFabric(self.paths)
+        variants = fab.list_models()
+        bases = fab.list_base_models()
+        self.assertEqual(len(variants), 23)
+        self.assertEqual(len(bases), 9)
+        pools = {b["quota_pool"] for b in bases}
+        self.assertEqual(pools, {"gemini_models", "claude_gpt", "gemini_argon"})
+
     def test_full_10_mission_acceptance_suite(self):
         rep = run_suite()
         self.assertEqual(rep["passed"], 10, msg=json.dumps(rep, indent=2))
