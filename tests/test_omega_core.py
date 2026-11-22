@@ -210,22 +210,21 @@ class OmegaCoreTests(unittest.TestCase):
         self.assertEqual(jres["prosecutor_model"], "claude-sonnet-5-5-medium")
         self.assertEqual(jres["judge_model"], "gpt-oss-120b-medium")
 
-        # Obsidian vault creation + 2-way inbox ingest + valid graph.json & canvas
+        # Obsidian vault creation + 2-way inbox ingest + valid 10-color single-galaxy graph.json
         vdir = os.path.join(self.tmpdir, "TestOmegaVault")
-        os.makedirs(os.path.join(vdir, "08-Inbox"), exist_ok=True)
-        with open(os.path.join(vdir, "08-Inbox", "my-idea.md"), "w", encoding="utf-8") as f:
+        os.makedirs(os.path.join(vdir, "Inbox"), exist_ok=True)
+        with open(os.path.join(vdir, "Inbox", "my-idea.md"), "w", encoding="utf-8") as f:
             f.write("# Idea\nTrack weekly armwrestling cable PRs automatically.\n")
 
         obs = ObsidianSync(vault_dir=vdir, paths=self.paths)
         sres = obs.sync_all(force_config=True, include_corpus_highlights=False)
         self.assertEqual(sres["ingest"]["ingested_count"], 1)
-        self.assertGreaterEqual(sres["nodes_written"], 10)
+        self.assertGreaterEqual(sres["nodes_written"], 20)
         with open(os.path.join(vdir, ".obsidian", "graph.json"), "r", encoding="utf-8") as f:
             gcfg = json.load(f)
-        self.assertEqual(len(gcfg["colorGroups"]), 8)
-        with open(sres["canvas"], "r", encoding="utf-8") as f:
-            cv = json.load(f)
-        self.assertGreaterEqual(len(cv["nodes"]), 8)
+        self.assertEqual(len(gcfg["colorGroups"]), 10)
+        self.assertFalse(gcfg["showTags"])
+        self.assertTrue(os.path.exists(os.path.join(vdir, "OMEGA-APEX.md")))
 
     def test_full_10_mission_acceptance_suite(self):
         rep = run_suite()
