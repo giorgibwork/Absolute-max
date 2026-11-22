@@ -19,58 +19,95 @@ from typing import Any, Callable
 from . import OmegaPaths, ensure_dirs, get_paths
 
 DEFAULT_CATALOG: list[dict[str, Any]] = [
-    {
-        "model_id": "gemini-4-hydrogen-low",
-        "provider_id": "antigravity",
-        "family": "gemini",
-        "roles": ["fast_default", "utility"],
-        "billing_status": "free",
-    },
-    {
-        "model_id": "gemini-4-neon-high",
-        "provider_id": "antigravity",
-        "family": "gemini",
-        "roles": ["deep_arch", "coding"],
-        "billing_status": "free",
-    },
-    {
-        "model_id": "gemini-pro-orchestrator-neon",
-        "provider_id": "antigravity",
-        "family": "gemini",
-        "roles": ["orchestrator", "research"],
-        "billing_status": "free",
-    },
-    {
-        "model_id": "claude-opus-5-5-medium",
-        "provider_id": "antigravity",
-        "family": "claude",
-        "roles": ["security_audit", "adversarial_review", "deep_arch"],
-        "billing_status": "free",
-    },
+    {"model_id": "gemini-4-neon-xhigh", "provider_id": "antigravity", "family": "gemini-neon", "roles": ["deep_arch", "max_reasoning", "coding"], "billing_status": "free"},
+    {"model_id": "gemini-4-neon-high", "provider_id": "antigravity", "family": "gemini-neon", "roles": ["deep_arch", "coding"], "billing_status": "free"},
+    {"model_id": "gemini-4-neon-medium", "provider_id": "antigravity", "family": "gemini-neon", "roles": ["coding", "general"], "billing_status": "free"},
+    {"model_id": "gemini-4-neon-low", "provider_id": "antigravity", "family": "gemini-neon", "roles": ["fast_default", "general"], "billing_status": "free"},
+    {"model_id": "gemini-4-argon-high", "provider_id": "antigravity", "family": "gemini-argon", "roles": ["deep_arch", "coding", "argon_pool"], "billing_status": "free"},
+    {"model_id": "gemini-4-argon-medium", "provider_id": "antigravity", "family": "gemini-argon", "roles": ["general", "argon_pool"], "billing_status": "free"},
+    {"model_id": "gemini-4-argon-low", "provider_id": "antigravity", "family": "gemini-argon", "roles": ["fast_default", "argon_pool"], "billing_status": "free"},
+    {"model_id": "gemini-4-hydrogen-xhigh", "provider_id": "antigravity", "family": "gemini-hydrogen", "roles": ["deep_arch", "coding"], "billing_status": "free"},
+    {"model_id": "gemini-4-hydrogen-high", "provider_id": "antigravity", "family": "gemini-hydrogen", "roles": ["coding", "general"], "billing_status": "free"},
+    {"model_id": "gemini-4-hydrogen-medium", "provider_id": "antigravity", "family": "gemini-hydrogen", "roles": ["general", "utility"], "billing_status": "free"},
+    {"model_id": "gemini-4-hydrogen-low", "provider_id": "antigravity", "family": "gemini-hydrogen", "roles": ["fast_default", "utility"], "billing_status": "free"},
+    {"model_id": "gemini-pro-orchestrator-neon", "provider_id": "antigravity", "family": "gemini-orchestrator", "roles": ["orchestrator", "research"], "billing_status": "free"},
+    {"model_id": "gemini-pro-orchestrator-g1-pro", "provider_id": "antigravity", "family": "gemini-argon", "roles": ["orchestrator", "research", "argon_pool"], "billing_status": "free"},
+    {"model_id": "gemini-3.8-flash-high", "provider_id": "antigravity", "family": "gemini-flash", "roles": ["fast_reasoning", "utility"], "billing_status": "free"},
+    {"model_id": "gemini-3.8-flash-medium", "provider_id": "antigravity", "family": "gemini-flash", "roles": ["fast_default", "utility"], "billing_status": "free"},
+    {"model_id": "gemini-3.8-flash-low", "provider_id": "antigravity", "family": "gemini-flash", "roles": ["fast_default", "ultra_fast"], "billing_status": "free"},
+    {"model_id": "claude-opus-5-5-high", "provider_id": "antigravity", "family": "claude-opus", "roles": ["security_audit", "adversarial_review", "max_reasoning"], "billing_status": "free"},
+    {"model_id": "claude-opus-5-5-medium", "provider_id": "antigravity", "family": "claude-opus", "roles": ["security_audit", "adversarial_review", "deep_arch"], "billing_status": "free"},
+    {"model_id": "claude-opus-5-5-low", "provider_id": "antigravity", "family": "claude-opus", "roles": ["security_audit", "fast_review"], "billing_status": "free"},
+    {"model_id": "claude-sonnet-5-5-high", "provider_id": "antigravity", "family": "claude-sonnet", "roles": ["coding", "deep_arch"], "billing_status": "free"},
+    {"model_id": "claude-sonnet-5-5-medium", "provider_id": "antigravity", "family": "claude-sonnet", "roles": ["coding", "general"], "billing_status": "free"},
+    {"model_id": "claude-sonnet-5-5-low", "provider_id": "antigravity", "family": "claude-sonnet", "roles": ["fast_default", "utility"], "billing_status": "free"},
+    {"model_id": "gpt-oss-120b-medium", "provider_id": "antigravity", "family": "openai-gpt-oss", "roles": ["adversarial_review", "cross_family", "general"], "billing_status": "free"},
 ]
 
 ROUTE_RULES: list[tuple[str, re.Pattern[str], list[str]]] = [
     (
         "security_audit",
         re.compile(r"\b(?:audit|security|verify|adversarial|red[- ]?team|hostile|injection)\b", re.IGNORECASE),
-        ["claude-opus-5-5-medium", "gemini-4-neon-high", "gemini-4-hydrogen-low"],
+        ["claude-opus-5-5-medium", "claude-opus-5-5-high", "gpt-oss-120b-medium", "gemini-4-neon-high", "gemini-4-argon-high"],
     ),
     (
         "deep_arch",
         re.compile(r"\b(?:architect|refactor|debug|patch|complex|multi[- ]?file|migration)\b", re.IGNORECASE),
-        ["gemini-4-neon-high", "claude-opus-5-5-medium", "gemini-4-hydrogen-low"],
+        ["gemini-4-neon-high", "gemini-4-neon-xhigh", "claude-sonnet-5-5-medium", "gemini-4-argon-high", "claude-opus-5-5-medium"],
     ),
     (
         "orchestrator",
         re.compile(r"\b(?:swarm|orchestrate|coordinate|maximize|optimize|research|benchmark)\b", re.IGNORECASE),
-        ["gemini-pro-orchestrator-neon", "gemini-4-neon-high", "claude-opus-5-5-medium"],
+        ["gemini-pro-orchestrator-neon", "gemini-pro-orchestrator-g1-pro", "gemini-4-neon-high", "claude-opus-5-5-medium"],
     ),
     (
         "fast_default",
         re.compile(r".*"),
-        ["gemini-4-hydrogen-low", "gemini-4-neon-high", "claude-opus-5-5-medium"],
+        ["gemini-4-hydrogen-low", "gemini-3.8-flash-low", "claude-sonnet-5-5-low", "gemini-4-argon-low", "gpt-oss-120b-medium"],
     ),
 ]
+
+
+def infer_family(model_id: str) -> str:
+    m = model_id.lower()
+    if "opus" in m:
+        return "claude-opus"
+    if "sonnet" in m:
+        return "claude-sonnet"
+    if "claude" in m:
+        return "claude"
+    if "gpt" in m:
+        return "openai-gpt-oss"
+    if "orchestrator-g1" in m or "argon" in m:
+        return "gemini-argon"
+    if "orchestrator" in m:
+        return "gemini-orchestrator"
+    if "neon" in m:
+        return "gemini-neon"
+    if "hydrogen" in m:
+        return "gemini-hydrogen"
+    if "flash" in m:
+        return "gemini-flash"
+    return "other"
+
+
+def discover_agy_models(timeout_s: int = 12) -> list[dict[str, str]]:
+    """Query `agy models` live ($0.00, zero token burn) and return discovered model IDs + labels."""
+    try:
+        r = subprocess.run(["agy", "models"], capture_output=True, text=True, timeout=timeout_s)
+    except Exception:
+        return []
+    out: list[dict[str, str]] = []
+    # Strip ANSI/carriage-return spinner artifacts cleanly
+    raw = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", r.stdout or "")
+    for chunk in raw.replace("\r", "\n").splitlines():
+        ln = chunk.strip()
+        if not ln or ln.startswith("ERROR:") or "Fetching available models" in ln:
+            continue
+        m = re.match(r"^([a-z0-9][a-z0-9._-]{3,})(?:\t+|\s{2,})(.+)$", ln)
+        if m:
+            out.append({"model_id": m.group(1), "label": m.group(2).strip(), "family": infer_family(m.group(1))})
+    return out
 
 
 def _connect(paths: OmegaPaths) -> sqlite3.Connection:
@@ -241,7 +278,7 @@ class IntelligenceFabric:
                 """,
                 (
                     model_id,
-                    "claude" if "claude" in model_id else "gemini",
+                    infer_family(model_id),
                     state,
                     float(res["latency_ms"]),
                     fidelity,
@@ -263,6 +300,34 @@ class IntelligenceFabric:
             "injection_resistance": inj_res,
             "limitations": limitation,
         }
+
+    def sync_live_catalog(self) -> dict[str, Any]:
+        """Sync all live models from `agy models` into models.db ($0.00, zero token burn)."""
+        found = discover_agy_models()
+        conn = _connect(self.paths)
+        added = 0
+        try:
+            for item in found:
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO model_qualifications
+                        (model_id, provider_id, family, roles_json, billing_status)
+                    VALUES (?, 'antigravity', ?, '["discovered"]', 'free')
+                    """,
+                    (item["model_id"], item["family"]),
+                )
+                added += cur.rowcount
+            # Normalize family labels on existing rows too
+            for row in conn.execute("SELECT model_id FROM model_qualifications").fetchall():
+                conn.execute(
+                    "UPDATE model_qualifications SET family = ? WHERE model_id = ?",
+                    (infer_family(row["model_id"]), row["model_id"]),
+                )
+            conn.commit()
+            total = conn.execute("SELECT COUNT(*) FROM model_qualifications").fetchone()[0]
+        finally:
+            conn.close()
+        return {"discovered_live": len(found), "newly_added": added, "total_in_registry": total}
 
     def list_models(self) -> list[dict[str, Any]]:
         conn = _connect(self.paths)

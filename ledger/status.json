@@ -72,10 +72,10 @@
       "name": "Intelligence Fabric (Model Qualification & Routing)",
       "owner": "omega_core/fabric.py",
       "adapters": ["omega_core/cli.py#models"],
-      "test_refs": ["omega_core/suite.py#Mission-E", "omega models qualify (live 4/4)"],
+      "test_refs": ["omega_core/suite.py#Mission-E", "omega models sync (23/23 live)", "omega models qualify (10/23 across all 8 families)"],
       "status": "QUALIFIED",
       "known_limitations": [
-        "All 4 default catalog models live-qualified on POCO F6 Pro (claude-opus-5-5-medium 8.4s, gemini-4-neon-high 10.9s, gemini-4-hydrogen-low 13.1s, gemini-pro-orchestrator-neon 13.3s); extra agy models remain untested until added to catalog."
+        "All 23 live agy models synced into models.db across 8 families and 3 independent quota pools (Gemini, Argon, Claude+GPT). 10/23 family leaders live-qualified (all 1.0 fidelity & 1.0 injection resistance); remaining 13 effort tiers stay UNKNOWN until probed on demand to preserve 5-hour quota."
       ]
     },
     {

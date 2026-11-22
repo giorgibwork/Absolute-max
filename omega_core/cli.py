@@ -145,6 +145,8 @@ def cmd_models(args) -> None:
     fab = IntelligenceFabric()
     if args.action == "list":
         _jprint(fab.list_models())
+    elif args.action == "sync":
+        _jprint(fab.sync_live_catalog())
     elif args.action == "qualify":
         targets = args.models or [m["model_id"] for m in fab.list_models()]
         out = [fab.qualify_model(mid, timeout_s=args.timeout) for mid in targets]
@@ -216,10 +218,11 @@ def cmd_dashboard(args) -> None:
     print(f"- Pending approvals: {len(approvals)}")
     for a in approvals[:5]:
         print(f"  * {a['approval_id']} [{a['action_class']}] {a['summary'][:70]}")
-    print("- Models:")
-    for mod in models:
+    q_models = [m for m in models if m["qualification_state"] == "QUALIFIED"]
+    print(f"- Models: {len(q_models)}/{len(models)} QUALIFIED (run `omega models list` for all {len(models)})")
+    for mod in q_models:
         lat = f"{mod['latency_ms']:.0f}ms" if mod["latency_ms"] else "untested"
-        print(f"  * {mod['model_id']}: {mod['qualification_state']} ({lat})")
+        print(f"  * {mod['model_id']} [{mod['family']}]: {mod['qualification_state']} ({lat})")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -319,6 +322,7 @@ def build_parser() -> argparse.ArgumentParser:
     pmod = sub.add_parser("models", help="Model qualification registry & routing")
     pmod_sub = pmod.add_subparsers(dest="action", required=True)
     pmod_sub.add_parser("list")
+    pmod_sub.add_parser("sync")
     pmod_q = pmod_sub.add_parser("qualify")
     pmod_q.add_argument("models", nargs="*")
     pmod_q.add_argument("--timeout", type=int, default=25)

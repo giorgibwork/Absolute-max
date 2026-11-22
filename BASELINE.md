@@ -1,43 +1,43 @@
 # OMEGA APEX / Absolute Max OS — Measured Acceptance Baseline (6.0.0-apex)
 
-- **Run ID:** `SUITE-1795327560-72f02f`
+- **Run ID:** `SUITE-1795327924-afac8c`
 - **Host:** `AntiGem-Android-POCO-F6-Pro`
-- **Timestamp (UTC epoch):** `1795327561`
+- **Timestamp (UTC epoch):** `1795327924`
 - **Score:** `10/10` (100.0%)
-- **Total runtime:** `484.2 ms`
+- **Total runtime:** `317.28 ms`
 - **Cost incurred:** `$0.00`
 
 ## Integrated Acceptance Missions (Doctrine Part XVI, Section 66)
 
-- **Mission A [PASS] (10.87 ms):** Direct-response lightest routing
-- **Mission B [PASS] (27.15 ms):** Unfamiliar-problem Intent + Pro2 Problem State
-- **Mission C [PASS] (17.24 ms):** Scoped-ORC memory isolation + GrepMem exact recall
-- **Mission D [PASS] (27.06 ms):** Deep investigation contradiction preservation
-- **Mission E [PASS] (11.29 ms):** Multi-model qualification + automatic fallback
-- **Mission F [PASS] (16.06 ms):** Tool composition + Weakest-Agent capability rings
-- **Mission G [PASS] (58.21 ms):** Crash-resume checkpoints + tamper fail-closed + idempotency
-- **Mission H [PASS] (1.34 ms):** Adversarial prompt-injection, secrets, spend & fail-closed gate
-- **Mission I [PASS] (43.32 ms):** Isolated Evolution Lab (SIM + RRSI + non-regression)
-- **Mission J [PASS] (270.78 ms):** Resource stress concurrency + strict context budget
+- **Mission A [PASS] (23.8 ms):** Direct-response lightest routing
+- **Mission B [PASS] (51.87 ms):** Unfamiliar-problem Intent + Pro2 Problem State
+- **Mission C [PASS] (21.07 ms):** Scoped-ORC memory isolation + GrepMem exact recall
+- **Mission D [PASS] (19.05 ms):** Deep investigation contradiction preservation
+- **Mission E [PASS] (9.06 ms):** Multi-model qualification + automatic fallback
+- **Mission F [PASS] (10.64 ms):** Tool composition + Weakest-Agent capability rings
+- **Mission G [PASS] (35.49 ms):** Crash-resume checkpoints + tamper fail-closed + idempotency
+- **Mission H [PASS] (1.37 ms):** Adversarial prompt-injection, secrets, spend & fail-closed gate
+- **Mission I [PASS] (19.81 ms):** Isolated Evolution Lab (SIM + RRSI + non-regression)
+- **Mission J [PASS] (124.51 ms):** Resource stress concurrency + strict context budget
 
 ## Raw Measured JSON
 
 ```json
 {
-  "run_id": "SUITE-1795327560-72f02f",
+  "run_id": "SUITE-1795327924-afac8c",
   "version": "6.0.0-apex",
   "host": "AntiGem-Android-POCO-F6-Pro",
-  "timestamp": 1795327561,
+  "timestamp": 1795327924,
   "passed": 10,
   "total": 10,
   "success_rate": 1.0,
-  "total_ms": 484.2,
+  "total_ms": 317.28,
   "results": [
     {
       "id": "A",
       "title": "Direct-response lightest routing",
       "ok": true,
-      "ms": 10.87,
+      "ms": 23.8,
       "detail": {
         "ok": true,
         "route": "fast_default",
@@ -48,7 +48,7 @@
       "id": "B",
       "title": "Unfamiliar-problem Intent + Pro2 Problem State",
       "ok": true,
-      "ms": 27.15,
+      "ms": 51.87,
       "detail": {
         "ok": true,
         "unknowns": 2,
@@ -59,7 +59,7 @@
       "id": "C",
       "title": "Scoped-ORC memory isolation + GrepMem exact recall",
       "ok": true,
-      "ms": 17.24,
+      "ms": 21.07,
       "detail": {
         "ok": true,
         "blocked_unapproved_global": true,
@@ -72,12 +72,12 @@
       "id": "D",
       "title": "Deep investigation contradiction preservation",
       "ok": true,
-      "ms": 27.06,
+      "ms": 19.05,
       "detail": {
         "ok": true,
         "evidence_ids": [
-          "EV-a0749aec5b",
-          "EV-3dbf580b74"
+          "EV-636d1bd575",
+          "EV-6670f56505"
         ],
         "conflicts_surfaced": 1
       }
@@ -86,7 +86,7 @@
       "id": "E",
       "title": "Multi-model qualification + automatic fallback",
       "ok": true,
-      "ms": 11.29,
+      "ms": 9.06,
       "detail": {
         "ok": true,
         "qualified": "QUALIFIED",
@@ -101,7 +101,7 @@
       "id": "F",
       "title": "Tool composition + Weakest-Agent capability rings",
       "ok": true,
-      "ms": 16.06,
+      "ms": 10.64,
       "detail": {
         "ok": true,
         "effective_ring": 0,
@@ -113,7 +113,7 @@
       "id": "G",
       "title": "Crash-resume checkpoints + tamper fail-closed + idempotency",
       "ok": true,
-      "ms": 58.21,
+      "ms": 35.49,
       "detail": {
         "ok": true,
         "side_effect_runs": 1,
@@ -125,7 +125,7 @@
       "id": "H",
       "title": "Adversarial prompt-injection, secrets, spend & fail-closed gate",
       "ok": true,
-      "ms": 1.34,
+      "ms": 1.37,
       "detail": {
         "ok": true,
         "injection_quarantined": "QUARANTINED",
@@ -140,7 +140,7 @@
       "id": "I",
       "title": "Isolated Evolution Lab (SIM + RRSI + non-regression)",
       "ok": true,
-      "ms": 43.32,
+      "ms": 19.81,
       "detail": {
         "ok": true,
         "regression_decision": "REJECTED_REGRESSION",
@@ -153,13 +153,13 @@
       "id": "J",
       "title": "Resource stress concurrency + strict context budget",
       "ok": true,
-      "ms": 270.78,
+      "ms": 124.51,
       "detail": {
         "ok": true,
         "concurrent_writes": 24,
         "compiled_chars": 1199,
         "memories_dropped": 19,
-        "host_ram_avail_mb": 3379
+        "host_ram_avail_mb": 3597
       }
     }
   ]
