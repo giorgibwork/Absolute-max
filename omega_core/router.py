@@ -15,7 +15,24 @@ import os
 import re
 from typing import Any
 
-from . import OmegaPaths, ensure_dirs, get_paths
+from . import R2_WORKSPACE, OmegaPaths, ensure_dirs, get_paths
+from .memory import KnowledgeFabric
+
+# Synonym bridge so natural speech ("my phone", "workout", "money") hits exact vault keys via JIT Hydration
+JIT_SYNONYMS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b(?:phone|poco|f6|roblox|touch|fps|hyperos|adb|shizuku|axmanager)\b", re.I), "vermeer"),
+    (re.compile(r"\b(?:tsb|saitama|claw|dash|combo)\b", re.I), "saitama"),
+    (re.compile(r"\b(?:money|bet|odds|kelly|polygon|usdc|cashout|binance|bank|gel)\b", re.I), "polymarket"),
+    (re.compile(r"\b(?:bounty|bounties|pr|issue|github\s+earn)\b", re.I), "bounty"),
+    (re.compile(r"\b(?:gym|workout|arm|hook|cable|protein|diet|steps|weight)\b", re.I), "armwrestling"),
+    (re.compile(r"\b(?:uk|ielts|lydia|travel|marriage)\b", re.I), "active_goals"),
+    (re.compile(r"\b(?:mcp|bridge|tunnl|termux)\b", re.I), "tunnl"),
+]
+
+JIT_STOP = {"the", "and", "for", "with", "what", "how", "can", "you", "our", "this", "that", "from", "have", "about", "just", "make", "need", "want"}
+
+HANDOFF_RX = re.compile(r"\b(?:handoff|wrap\s+up\s+for\s+new\s+chat|session\s+handoff|prepare\s+new\s+chat)\b", re.IGNORECASE)
+CRAWL_RX = re.compile(r"\b(?:scrape\s+\d+|bulk\s+crawl|crawl\s+500|mass\s+scrape|500\+\s+pages)\b", re.IGNORECASE)
 
 DEEP_RESEARCH_RX = re.compile(
     r"\b(?:deep\s+research|dig\s+deep|full\s+breakdown|investigate\s+deeply|maximize|optimize|absolute\s+ceiling|eye\s+of\s+god|research\s+everything|comprehensive\s+research)\b",
@@ -171,11 +188,64 @@ def classify_user_intent(user_input: str) -> list[dict[str, str]]:
             }
         )
 
+    if HANDOFF_RX.search(txt):
+        routes.append(
+            {
+                "intent": "HANDOFF",
+                "directive": (
+                    "[Omega Intent -> Session Handoff] Silently run `omega handoff` and give Giorgi a crisp copy-ready fresh-chat handoff summary."
+                ),
+            }
+        )
+
+    if CRAWL_RX.search(txt):
+        routes.append(
+            {
+                "intent": "BULK_CRAWL",
+                "directive": (
+                    "[Omega Intent -> 500+ Page Local Bulk Crawler] Run `omega crawl \"<topic>\" --pages 500` (0 LLM tokens, local SQLite FTS5) "
+                    "instead of burning repeated search_web turns, then synthesize ONLY from the top BM25 hits."
+                ),
+            }
+        )
+
     return routes
 
 
+def jit_hydrate_memories(user_input: str, paths: OmegaPaths, max_chars: int = 1200) -> str:
+    """Zero-tool-call Pre-Turn JIT Context Hydration (JitMem + HiGram pattern)."""
+    if len(user_input.strip()) < 5:
+        return ""
+    terms = [w for w in re.findall(r"[A-Za-z0-9_]{3,}", user_input.lower()) if w not in JIT_STOP]
+    for rx, syn in JIT_SYNONYMS:
+        if rx.search(user_input) and syn not in terms:
+            terms.insert(0, syn)
+    if not terms:
+        return ""
+
+    query = " OR ".join(dict.fromkeys(terms[:5]))
+    try:
+        kf = KnowledgeFabric(paths)
+        hits = kf.graph_search(query, caller_ring=R2_WORKSPACE, hops=1, limit=3)
+    except Exception:
+        return ""
+    if not hits:
+        return ""
+
+    lines = ["<jit_hydrated_context>"]
+    used = len(lines[0]) + len("</jit_hydrated_context>") + 2
+    for h in hits:
+        entry = f"- [{h['key']}|hop={h.get('match_hop', 0)}] {h['text'].replace(chr(10), ' ')[:360]}"
+        if used + len(entry) + 1 > max_chars:
+            break
+        lines.append(entry)
+        used += len(entry) + 1
+    lines.append("</jit_hydrated_context>")
+    return "\n".join(lines) if len(lines) > 2 else ""
+
+
 def route_invocation(payload: dict[str, Any], paths: OmegaPaths | None = None) -> dict[str, Any]:
-    """Stateful once-per-user-message hook router for PreInvocation."""
+    """Stateful once-per-user-message hook router + Pre-Turn JIT Memory Hydrator."""
     p = paths or get_paths()
     user_input = str(payload.get("lastUserInput") or "").strip()
     if not user_input:
@@ -206,9 +276,15 @@ def route_invocation(payload: dict[str, Any], paths: OmegaPaths | None = None) -
     except Exception:
         pass
 
+    parts: list[str] = []
     routes = classify_user_intent(user_input)
-    if not routes:
+    if routes:
+        parts.append(" ".join(r["directive"] for r in routes))
+    jit = jit_hydrate_memories(user_input, p)
+    if jit:
+        parts.append(jit)
+
+    if not parts:
         return {}
 
-    combined = " ".join(r["directive"] for r in routes)
-    return {"injectSteps": [{"systemMessage": {"systemMessage": combined}}]}
+    return {"injectSteps": [{"systemMessage": {"systemMessage": "\n".join(parts)}}]}

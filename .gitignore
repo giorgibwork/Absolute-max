@@ -9,6 +9,7 @@ __pycache__/
 *.bak*
 *.patch
 .env
+.venv/
 *.secret
 *.key
 *.pem

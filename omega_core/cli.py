@@ -9,6 +9,17 @@ import sys
 
 # Ensure repo root is importable when invoked via symlink in ~/.local/bin/omega
 _REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+_VENV_DIR = os.path.join(_REPO, ".venv")
+_VENV_PY = os.path.join(_VENV_DIR, "bin", "python3")
+# Auto-upgrade to isolated .venv for omni commands (crawl/yt/doc) while keeping fast system python for everything else
+if (
+    len(sys.argv) > 1
+    and sys.argv[1] in ("crawl", "yt", "doc")
+    and os.path.isfile(_VENV_PY)
+    and os.path.realpath(sys.prefix) != os.path.realpath(_VENV_DIR)
+):
+    os.execv(_VENV_PY, [_VENV_PY, os.path.realpath(__file__), *sys.argv[1:]])
+
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
@@ -22,7 +33,9 @@ from omega_core.kernel import evaluate_tool_call
 from omega_core.memory import KnowledgeFabric
 from omega_core.mission import MissionKernel
 from omega_core.obsidian import DEFAULT_VAULT_DIR, ObsidianSync
+from omega_core.omni import bulk_crawl, fetch_youtube_transcript, read_document
 from omega_core.research import ResearchEngine
+from omega_core.rtk import generate_handoff, run_compressed
 from omega_core.suite import run_suite
 
 
@@ -231,6 +244,34 @@ def cmd_mcp_mode(args) -> None:
         subprocess.run(["python3", toggle, *c], capture_output=True, text=True, timeout=5)
     r = subprocess.run(["python3", toggle, "status"], capture_output=True, text=True, timeout=5)
     print(r.stdout.strip())
+
+
+def cmd_crawl(args) -> None:
+    _jprint(bulk_crawl(args.topic, target_pages=args.pages, follow_bfs_pages=args.bfs, max_workers=args.workers))
+
+
+def cmd_yt(args) -> None:
+    _jprint(fetch_youtube_transcript(args.url))
+
+
+def cmd_doc(args) -> None:
+    _jprint(read_document(args.path, max_chars=args.max_chars))
+
+
+def cmd_handoff(args) -> None:
+    _jprint(generate_handoff(note=args.note))
+
+
+def cmd_rtk(args) -> None:
+    cmd = list(args.command or [])
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    if not cmd:
+        raise SystemExit("omega rtk requires a command to run")
+    res = run_compressed(cmd, timeout_s=args.timeout)
+    print(res["text"])
+    print(f"[RTK rc={res['rc']} ms={res['ms']} saved={res['saved_pct']}% ({res['orig_chars']}->{res['compressed_chars']} chars)]")
+    sys.exit(res["rc"])
 
 
 def cmd_research(args) -> None:
@@ -499,6 +540,36 @@ def build_parser() -> argparse.ArgumentParser:
     pmcp = sub.add_parser("mcp-mode", help="Toggle MCP server profile (light, ultra, full) to save context tokens")
     pmcp.add_argument("mode", choices=["light", "ultra", "full"])
     pmcp.set_defaults(func=cmd_mcp_mode)
+
+    # crawl (500+ page $0.00 local bulk SQLite FTS5 crawler)
+    pcr = sub.add_parser("crawl", help="Bulk-crawl up to 500+ public pages into local SQLite FTS5 (0 LLM tokens)")
+    pcr.add_argument("topic")
+    pcr.add_argument("--pages", type=int, default=500)
+    pcr.add_argument("--bfs", type=int, default=80)
+    pcr.add_argument("--workers", type=int, default=16)
+    pcr.set_defaults(func=cmd_crawl)
+
+    # yt (instant zero-download YouTube transcript)
+    pyt = sub.add_parser("yt", help="Fetch instant timestamped YouTube captions (<1.5s, 0 download)")
+    pyt.add_argument("url")
+    pyt.set_defaults(func=cmd_yt)
+
+    # doc (PDF / DOCX / XLSX / YAML reader)
+    pdc = sub.add_parser("doc", help="Read PDF, DOCX, XLSX, or text document cleanly")
+    pdc.add_argument("path")
+    pdc.add_argument("--max-chars", type=int, default=12000)
+    pdc.set_defaults(func=cmd_doc)
+
+    # handoff (compact fresh-chat handoff card)
+    pho = sub.add_parser("handoff", help="Generate <750-char Session Handoff Card for fresh chat")
+    pho.add_argument("--note", default="")
+    pho.set_defaults(func=cmd_handoff)
+
+    # rtk (RTK-style compressed command runner)
+    prtk = sub.add_parser("rtk", help="Run a command with RTK stdout compression (strips progress spam, keeps all errors)")
+    prtk.add_argument("--timeout", type=int, default=30)
+    prtk.add_argument("command", nargs=argparse.REMAINDER)
+    prtk.set_defaults(func=cmd_rtk)
 
     # suite
     psu = sub.add_parser("suite", help="Run 10-Mission Integrated Acceptance Suite (A-J)")

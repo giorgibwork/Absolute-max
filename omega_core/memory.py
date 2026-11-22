@@ -547,7 +547,7 @@ class KnowledgeFabric:
                 hits.append(obj)
         return hits[-limit:]
 
-    # --- Deterministic Context Compiler with Manifest ---
+    # --- Deterministic Context Compiler with Manifest (Full or Telegraphic L1) ---
     def compile_context(
         self,
         *,
@@ -555,14 +555,21 @@ class KnowledgeFabric:
         mission_id: str | None = None,
         caller_ring: int = R2_WORKSPACE,
         budget_chars: int = 5600,
+        telegraphic: bool = False,
     ) -> dict[str, Any]:
-        """Compile bounded, provenance-tagged, prefix-cache-safe context + manifest."""
+        """Compile bounded, provenance-tagged, prefix-cache-safe context + manifest.
+
+        When telegraphic=True (L1 Working Memory mode), compresses pinned rules +
+        active memories into a dense ~1.6KB static pointer index while PreInvocation
+        JIT Hydration dynamically loads exact full verbatim memories on demand.
+        """
         sections: list[str] = []
         manifest: dict[str, Any] = {
             "task_family": task_family,
             "mission_id": mission_id or "",
             "caller_ring": caller_ring,
             "budget_chars": budget_chars,
+            "telegraphic": telegraphic,
             "pins": 0,
             "memories_included": [],
             "memories_dropped": 0,
@@ -586,7 +593,10 @@ class KnowledgeFabric:
                 with open(self.paths.pinned_constraints, "r", encoding="utf-8") as pf:
                     pins = sorted(set(str(x) for x in json.load(pf)))
                 if pins:
-                    pin_lines = ["<pinned_constraints>"] + [f"- {c[:180]}" for c in pins] + ["</pinned_constraints>"]
+                    if telegraphic:
+                        pin_lines = ["<pinned_constraints>"] + [f"- {c[:115]}" for c in pins] + ["</pinned_constraints>"]
+                    else:
+                        pin_lines = ["<pinned_constraints>"] + [f"- {c[:180]}" for c in pins] + ["</pinned_constraints>"]
                     if try_add("\n".join(pin_lines)):
                         manifest["pins"] = len(pins)
             except Exception:
@@ -600,24 +610,24 @@ class KnowledgeFabric:
                 lines = [
                     "<active_mission>",
                     f"- id={m['mission_id']} state={m['state']} mode={m['autonomy_mode']} family={m['task_family']}",
-                    f"- objective: {m['objective'][:240]}",
+                    f"- objective: {m['objective'][:200]}",
                 ]
                 for pr in m.get("problems", []):
                     if pr["status"] in ("OPEN", "TESTING"):
-                        top_h = pr["hypotheses"][0]["proposal"][:100] if pr.get("hypotheses") else "none"
-                        lines.append(f"- blocker[{pr['problem_id']}|sev={pr['severity']}]: {pr['blocker'][:140]} (top: {top_h})")
+                        top_h = pr["hypotheses"][0]["proposal"][:90] if pr.get("hypotheses") else "none"
+                        lines.append(f"- blocker[{pr['problem_id']}|sev={pr['severity']}]: {pr['blocker'][:120]} (top: {top_h})")
                         manifest["problems_included"].append(pr["problem_id"])
                 lines.append("</active_mission>")
                 try_add("\n".join(lines))
             except Exception:
                 pass
 
-        # Layer 3: Scoped-ORC + Ring-Filtered Memories (sorted deterministically)
+        # Layer 3: Scoped-ORC + Ring-Filtered Memories (Telegraphic Pointer Index OR Full)
         conn = connect_vault(self.paths)
         try:
             rows = conn.execute(
                 """
-                SELECT key, authority, task_family, capability_ring, text
+                SELECT key, tags, authority, task_family, capability_ring, text
                 FROM memories
                 WHERE status = 'active'
                   AND capability_ring <= ?
@@ -631,19 +641,34 @@ class KnowledgeFabric:
             conn.close()
 
         if rows:
-            mem_lines = ["<omega_memory_index>"]
-            local_used = len(mem_lines[0]) + len("</omega_memory_index>") + 2
-            for r in rows:
-                ln = f"- [{r['authority']}|{r['task_family']}|R{r['capability_ring']}] {r['key']}: {r['text'].replace(chr(10), ' ')[:170]}"
-                if used + local_used + len(ln) + 1 > budget_chars:
-                    manifest["memories_dropped"] += 1
-                    continue
-                mem_lines.append(ln)
-                local_used += len(ln) + 1
-                manifest["memories_included"].append(r["key"])
-            mem_lines.append("</omega_memory_index>")
-            if manifest["memories_included"]:
-                try_add("\n".join(mem_lines))
+            if telegraphic:
+                # L1 Telegraphic Pointer Index (~70% smaller, Prompt-Cache safe; PreInvocation JIT hydrates full text!)
+                ptr_items: list[str] = []
+                for r in rows:
+                    tag_hint = f"({r['tags'][:28]})" if r["tags"] else ""
+                    ptr_items.append(f"{r['key']}{tag_hint}")
+                    manifest["memories_included"].append(r["key"])
+                block = (
+                    "<omega_memory_pointers mode=\"telegraphic_L1\">\n"
+                    "Full matching memories auto-hydrate per turn via PreInvocation JIT (or `omega mem graph <q>`):\n"
+                    + " | ".join(ptr_items)
+                    + "\n</omega_memory_pointers>"
+                )
+                try_add(block)
+            else:
+                mem_lines = ["<omega_memory_index>"]
+                local_used = len(mem_lines[0]) + len("</omega_memory_index>") + 2
+                for r in rows:
+                    ln = f"- [{r['authority']}|{r['task_family']}|R{r['capability_ring']}] {r['key']}: {r['text'].replace(chr(10), ' ')[:170]}"
+                    if used + local_used + len(ln) + 1 > budget_chars:
+                        manifest["memories_dropped"] += 1
+                        continue
+                    mem_lines.append(ln)
+                    local_used += len(ln) + 1
+                    manifest["memories_included"].append(r["key"])
+                mem_lines.append("</omega_memory_index>")
+                if manifest["memories_included"]:
+                    try_add("\n".join(mem_lines))
 
         # Layer 4: Linked Verified Evidence
         if mission_id:

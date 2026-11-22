@@ -283,6 +283,37 @@ class OmegaCoreTests(unittest.TestCase):
         self.assertTrue(dr["ok"])
         self.assertEqual(dr["failures"]["total_signatures"], 1)
 
+    def test_v63_rtk_telegraphic_jit_hydration_and_handoff(self):
+        from omega_core.router import jit_hydrate_memories
+        from omega_core.rtk import compress_output, generate_handoff
+
+        # 1. RTK strips git progress bars & ANSI while keeping ERROR lines verbatim
+        noisy = "\x1b[32mEnumerating objects: 10, done.\x1b[0m\n" + "\n".join(
+            f"Counting objects: {i}% ({i}/100)" for i in range(1, 99)
+        ) + "\nERROR: fatal auth failure on repo\nWriting objects: 100% (10/10), done.\n"
+        comp = compress_output(noisy)
+        self.assertGreater(comp["saved_pct"], 80.0)
+        self.assertIn("ERROR: fatal auth failure on repo", comp["text"])
+        self.assertNotIn("Counting objects: 50%", comp["text"])
+
+        # 2. Telegraphic SessionStart shrinks size while JIT Hydration pulls exact matching memory on turn 1
+        kf = KnowledgeFabric(self.paths)
+        kf.add_memory("device/vermeer_touch", "Goodix gt9916 120Hz touch fix verified on POCO F6 Pro", task_family="global", global_override=True, tags="vermeer,touch")
+        kf.add_memory("finance/polymarket_rail", "Polygon Native USDC zero-gas offramp via Binance", task_family="global", global_override=True, tags="polymarket,usdc")
+        full_ctx = kf.compile_context(task_family="global", telegraphic=False)
+        tele_ctx = kf.compile_context(task_family="global", telegraphic=True)
+        self.assertIn("telegraphic_L1", tele_ctx["context"])
+        self.assertIn("device/vermeer_touch", tele_ctx["context"])
+
+        jit = jit_hydrate_memories("my phone touch feels delayed in roblox", self.paths)
+        self.assertIn("Goodix gt9916", jit)
+        self.assertNotIn("Binance", jit)
+
+        # 3. Session Handoff Card stays strictly under 750 chars
+        ho = generate_handoff(self.paths, note="Next build v6.4")
+        self.assertLessEqual(ho["chars"], 750)
+        self.assertTrue(os.path.exists(ho["handoff_path"]))
+
     def test_full_10_mission_acceptance_suite(self):
         rep = run_suite()
         self.assertEqual(rep["passed"], 10, msg=json.dumps(rep, indent=2))

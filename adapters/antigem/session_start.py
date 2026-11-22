@@ -55,7 +55,8 @@ def main() -> None:
         task_family=active_family,
         mission_id=active_mid,
         caller_ring=R2_WORKSPACE,
-        budget_chars=5600,
+        budget_chars=2400,
+        telegraphic=True,
     )
     ctx = compiled["context"].strip()
     if not ctx:
