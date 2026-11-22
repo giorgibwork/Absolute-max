@@ -13,6 +13,9 @@ if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
 from omega_core import R2_WORKSPACE, VERSION, get_paths
+from omega_core.bavar import allocate_verification, verified_calc
+from omega_core.codegraph import CodeGraph
+from omega_core.dream import DreamEngine
 from omega_core.evo import EvolutionLab
 from omega_core.fabric import IntelligenceFabric
 from omega_core.kernel import evaluate_tool_call
@@ -144,6 +147,18 @@ def cmd_mem(args) -> None:
                 budget_chars=args.budget,
             )
         )
+    elif args.action == "graph":
+        _jprint(
+            kf.graph_search(
+                args.query,
+                task_family=args.family,
+                caller_ring=args.ring,
+                hops=args.hops,
+                limit=args.limit,
+            )
+        )
+    elif args.action == "link":
+        _jprint(kf.link_memories(args.src, args.rel, args.dst, weight=args.weight))
 
 
 def cmd_models(args) -> None:
@@ -166,6 +181,56 @@ def cmd_obsidian(args) -> None:
         _jprint(obs.sync_all(force_config=args.force_config))
     elif args.action == "ingest":
         _jprint(obs.ingest_user_notes())
+
+
+def cmd_code(args) -> None:
+    cg = CodeGraph()
+    if args.action == "index":
+        _jprint(cg.index_directory(args.directory))
+    elif args.action == "find":
+        _jprint(cg.find_symbol(args.query, limit=args.limit))
+    elif args.action == "callers":
+        _jprint(cg.trace_callers(args.symbol, max_hops=args.hops, limit=args.limit))
+    elif args.action == "outline":
+        _jprint(cg.file_outline(args.file))
+
+
+def cmd_dream(args) -> None:
+    de = DreamEngine()
+    if args.action == "run":
+        _jprint(de.run_dream(sync_obsidian=not args.no_obsidian, index_code=not args.no_code))
+    elif args.action == "failures":
+        _jprint(de.list_failure_signatures(limit=args.limit))
+
+
+def cmd_calc(args) -> None:
+    _jprint(verified_calc(args.expression, label=args.label, mission_id=args.mission_id, record_evidence=not args.no_record))
+
+
+def cmd_bavar(args) -> None:
+    _jprint(
+        allocate_verification(
+            args.action_class,
+            uncertainty=args.uncertainty,
+            irreversible=args.irreversible,
+            budget_remaining=args.budget,
+        )
+    )
+
+
+def cmd_mcp_mode(args) -> None:
+    import subprocess
+    toggle = os.path.expanduser("~/tools/mcp_toggle.py")
+    if args.mode == "light":
+        cmds = [["disable", "custom_plugin_developer_mcp"], ["disable", "browser_mcp"]]
+    elif args.mode == "ultra":
+        cmds = [["disable", "custom_plugin_developer_mcp"], ["disable", "browser_mcp"], ["disable", "jarvis_mcp"]]
+    else:
+        cmds = [["enable", "custom_plugin_developer_mcp"], ["enable", "browser_mcp"], ["enable", "jarvis_mcp"]]
+    for c in cmds:
+        subprocess.run(["python3", toggle, *c], capture_output=True, text=True, timeout=5)
+    r = subprocess.run(["python3", toggle, "status"], capture_output=True, text=True, timeout=5)
+    print(r.stdout.strip())
 
 
 def cmd_research(args) -> None:
@@ -337,6 +402,17 @@ def build_parser() -> argparse.ArgumentParser:
     pk_ctx.add_argument("--mission-id", default=None)
     pk_ctx.add_argument("--ring", type=int, default=R2_WORKSPACE)
     pk_ctx.add_argument("--budget", type=int, default=5600)
+    pk_gr = pk_sub.add_parser("graph")
+    pk_gr.add_argument("query")
+    pk_gr.add_argument("--family", default=None)
+    pk_gr.add_argument("--ring", type=int, default=R2_WORKSPACE)
+    pk_gr.add_argument("--hops", type=int, default=2)
+    pk_gr.add_argument("--limit", type=int, default=10)
+    pk_lk = pk_sub.add_parser("link")
+    pk_lk.add_argument("src")
+    pk_lk.add_argument("rel")
+    pk_lk.add_argument("dst")
+    pk_lk.add_argument("--weight", type=float, default=1.0)
     pk.set_defaults(func=cmd_mem)
 
     # models
@@ -376,6 +452,53 @@ def build_parser() -> argparse.ArgumentParser:
     po_sync.add_argument("--force-config", action="store_true", help="Overwrite .obsidian graph/theme settings")
     po_sub.add_parser("ingest")
     po.set_defaults(func=cmd_obsidian)
+
+    # code (AST CodeGraph)
+    pc = sub.add_parser("code", help="Vectorless AST Code-Graph & Recursive-CTE caller navigator")
+    pc_sub = pc.add_subparsers(dest="action", required=True)
+    pc_i = pc_sub.add_parser("index")
+    pc_i.add_argument("directory", nargs="?", default=os.path.expanduser("~/projects/Absolute-max/omega_core"))
+    pc_f = pc_sub.add_parser("find")
+    pc_f.add_argument("query")
+    pc_f.add_argument("--limit", type=int, default=12)
+    pc_c = pc_sub.add_parser("callers")
+    pc_c.add_argument("symbol")
+    pc_c.add_argument("--hops", type=int, default=2)
+    pc_c.add_argument("--limit", type=int, default=25)
+    pc_o = pc_sub.add_parser("outline")
+    pc_o.add_argument("file")
+    pc.set_defaults(func=cmd_code)
+
+    # dream (Async Consolidation + Failure Signatures)
+    pdrm = sub.add_parser("dream", help="Offline Dreaming consolidation & failure-signature clustering")
+    pdrm_sub = pdrm.add_subparsers(dest="action", required=True)
+    pdrm_r = pdrm_sub.add_parser("run")
+    pdrm_r.add_argument("--no-obsidian", action="store_true")
+    pdrm_r.add_argument("--no-code", action="store_true")
+    pdrm_f = pdrm_sub.add_parser("failures")
+    pdrm_f.add_argument("--limit", type=int, default=15)
+    pdrm.set_defaults(func=cmd_dream)
+
+    # calc (FinVeriQA deterministic math)
+    pcalc = sub.add_parser("calc", help="FinVeriQA deterministic Python AST calculator with evidence logging")
+    pcalc.add_argument("expression")
+    pcalc.add_argument("--label", default="calculation")
+    pcalc.add_argument("--mission-id", default="")
+    pcalc.add_argument("--no-record", action="store_true")
+    pcalc.set_defaults(func=cmd_calc)
+
+    # bavar (Adaptive verification allocator)
+    pbav = sub.add_parser("bavar", help="BAVAR adaptive verification tier allocator")
+    pbav.add_argument("action_class")
+    pbav.add_argument("--uncertainty", type=float, default=0.2)
+    pbav.add_argument("--irreversible", action="store_true")
+    pbav.add_argument("--budget", type=float, default=1.0)
+    pbav.set_defaults(func=cmd_bavar)
+
+    # mcp-mode (Light / Ultra / Full MCP schema diet)
+    pmcp = sub.add_parser("mcp-mode", help="Toggle MCP server profile (light, ultra, full) to save context tokens")
+    pmcp.add_argument("mode", choices=["light", "ultra", "full"])
+    pmcp.set_defaults(func=cmd_mcp_mode)
 
     # suite
     psu = sub.add_parser("suite", help="Run 10-Mission Integrated Acceptance Suite (A-J)")

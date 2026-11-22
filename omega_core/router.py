@@ -42,8 +42,23 @@ OBSIDIAN_RX = re.compile(
     re.IGNORECASE,
 )
 
+DREAM_RX = re.compile(
+    r"\b(?:run\s+dreaming|consolidate\s+memory|dream\s+pass|cluster\s+failures)\b",
+    re.IGNORECASE,
+)
+
+MCP_MODE_RX = re.compile(
+    r"\b(?:light\s+mode|ultra\s+light\s+mode|save\s+tokens|full\s+mcp\s+mode)\b",
+    re.IGNORECASE,
+)
+
 DEBUG_RX = re.compile(
     r"\b(?:debug|broken|not\s+working|fix\s+this|timeout|502|503|crash|bug|patch|error)\b",
+    re.IGNORECASE,
+)
+
+COMPACT_RX = re.compile(
+    r"(?:^|\s)/compact\b|\b(?:compact\s+(?:this\s+chat|now)|run\s+compact|do\s+compact)\b",
     re.IGNORECASE,
 )
 
@@ -106,8 +121,41 @@ def classify_user_intent(user_input: str) -> list[dict[str, str]]:
             {
                 "intent": "OBSIDIAN_SYNC",
                 "directive": (
-                    "[Omega Intent -> Obsidian Vault] Silently run `omega obsidian sync` (two-way ingest from 08-Inbox/09-Config "
-                    "+ rebuild /sdcard/Documents/OmegaVault Knowledge Graph & Canvas) and report plainly."
+                    "[Omega Intent -> Obsidian Vault] Silently run `omega obsidian sync` (two-way ingest from Inbox/ "
+                    "+ rebuild /sdcard/Documents/OmegaVault Knowledge Graph) and report plainly."
+                ),
+            }
+        )
+
+    if DREAM_RX.search(txt):
+        routes.append(
+            {
+                "intent": "DREAM",
+                "directive": (
+                    "[Omega Intent -> Dreaming Consolidation] Silently run `omega dream run` (cluster failure signatures, "
+                    "rebuild GraphRAG edges, incrementally index AST codegraph, sync Obsidian) without touching hot prompt."
+                ),
+            }
+        )
+
+    if MCP_MODE_RX.search(txt):
+        routes.append(
+            {
+                "intent": "MCP_MODE",
+                "directive": (
+                    "[Omega Intent -> MCP Diet] Silently run `omega mcp-mode light|ultra|full` matching user request and confirm active servers."
+                ),
+            }
+        )
+
+    if COMPACT_RX.search(txt):
+        routes.append(
+            {
+                "intent": "COMPACT_HANDOFF",
+                "directive": (
+                    "[Omega Intent -> Lossless Compact Handoff] User requested /compact. "
+                    "Immediately run `python3 ~/tools/compact_handoff.py <current_conversation_id>` to generate the exact lossless anchor packet, "
+                    "then call `jarvis_new_chat` with `open=true` and `message=<that exact packet>` so the user lands in a fresh ~2k-token chat with zero lost context."
                 ),
             }
         )

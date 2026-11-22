@@ -106,6 +106,17 @@ def connect_vault(paths: OmegaPaths) -> sqlite3.Connection:
             freshness TEXT NOT NULL DEFAULT 'current',
             limitations TEXT NOT NULL DEFAULT ''
         );
+
+        CREATE TABLE IF NOT EXISTS memory_edges (
+            src_key TEXT NOT NULL,
+            rel TEXT NOT NULL,
+            dst_key TEXT NOT NULL,
+            weight REAL NOT NULL DEFAULT 1.0,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (src_key, rel, dst_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_me_src ON memory_edges(src_key);
+        CREATE INDEX IF NOT EXISTS idx_me_dst ON memory_edges(dst_key);
         """
     )
     conn.commit()
@@ -257,6 +268,109 @@ class KnowledgeFabric:
             return [dict(r) for r in rows]
         finally:
             conn.close()
+
+    # --- SQLite Recursive-CTE GraphRAG + Temporal Decay + RRF ---
+    def link_memories(self, src_key: str, rel: str, dst_key: str, weight: float = 1.0) -> dict[str, Any]:
+        valid_rels = ("depends_on", "contradicts", "supersedes", "related_to", "evidences", "solved_by")
+        if rel not in valid_rels:
+            raise ValueError(f"Invalid edge rel '{rel}'. Choose from {valid_rels}.")
+        conn = connect_vault(self.paths)
+        try:
+            conn.execute(
+                """
+                INSERT INTO memory_edges (src_key, rel, dst_key, weight, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(src_key, rel, dst_key) DO UPDATE SET
+                    weight=excluded.weight, created_at=excluded.created_at
+                """,
+                (src_key.strip(), rel, dst_key.strip(), float(weight), int(time.time())),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return {"src_key": src_key.strip(), "rel": rel, "dst_key": dst_key.strip(), "weight": float(weight)}
+
+    def graph_search(
+        self,
+        query: str,
+        *,
+        task_family: str | None = None,
+        caller_ring: int = R2_WORKSPACE,
+        hops: int = 2,
+        half_life_days: float = 30.0,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Hybrid FTS5 BM25 + 2-hop SQLite Recursive-CTE GraphRAG + Temporal Decay + RRF."""
+        seeds = self.search_memory(query, task_family=task_family, caller_ring=caller_ring, limit=limit)
+        if not seeds:
+            return []
+
+        now = time.time()
+        scores: dict[str, float] = {}
+        records: dict[str, dict[str, Any]] = {}
+        k_rrf = 60.0
+
+        for rank, item in enumerate(seeds, 1):
+            k = item["key"]
+            age_days = max(0.0, (now - float(item.get("updated_at", now))) / 86400.0)
+            decay = 0.5 ** (age_days / max(1.0, half_life_days))
+            scores[k] = scores.get(k, 0.0) + (1.0 / (k_rrf + rank)) * (0.7 + 0.3 * decay)
+            item["match_hop"] = 0
+            records[k] = item
+
+        # Expand neighbors via Recursive CTE (respecting Scoped-ORC & capability_ring!)
+        seed_keys = list(records.keys())[:6]
+        conn = connect_vault(self.paths)
+        try:
+            placeholders = ",".join("?" for _ in seed_keys)
+            rows = conn.execute(
+                f"""
+                WITH RECURSIVE walk(k, hop, path_w) AS (
+                    SELECT key, 0, 1.0 FROM memories WHERE key IN ({placeholders})
+                    UNION
+                    SELECT CASE WHEN e.src_key = w.k THEN e.dst_key ELSE e.src_key END,
+                           w.hop + 1,
+                           w.path_w * e.weight * 0.7
+                    FROM walk w
+                    JOIN memory_edges e ON e.src_key = w.k OR e.dst_key = w.k
+                    WHERE w.hop < ?
+                )
+                SELECT m.key, m.tags, m.text, m.authority, m.status, m.superseded_by,
+                       m.task_family, m.capability_ring, m.origin_uri, m.updated_at,
+                       MIN(w.hop) AS min_hop, MAX(w.path_w) AS max_w
+                FROM walk w
+                JOIN memories m ON m.key = w.k
+                WHERE w.hop > 0
+                  AND m.status = 'active'
+                  AND m.capability_ring <= ?
+                GROUP BY m.key
+                ORDER BY max_w DESC
+                LIMIT ?
+                """,
+                [*seed_keys, max(1, min(3, int(hops))), int(caller_ring), int(limit)],
+            ).fetchall()
+            for rank, r in enumerate(rows, 1):
+                d = dict(r)
+                fam = task_family.strip().lower() if task_family else None
+                if fam and d["task_family"] not in (fam, "global"):
+                    continue
+                k = d["key"]
+                age_days = max(0.0, (now - float(d.get("updated_at", now))) / 86400.0)
+                decay = 0.5 ** (age_days / max(1.0, half_life_days))
+                g_score = (1.0 / (k_rrf + rank + 5.0)) * float(d.pop("max_w", 0.5)) * (0.7 + 0.3 * decay)
+                scores[k] = scores.get(k, 0.0) + g_score
+                if k not in records:
+                    d["match_hop"] = d.pop("min_hop", 1)
+                    records[k] = d
+                else:
+                    d.pop("min_hop", None)
+        finally:
+            conn.close()
+
+        ranked = sorted(records.values(), key=lambda x: scores.get(x["key"], 0.0), reverse=True)
+        for item in ranked:
+            item["rrf_score"] = round(scores.get(item["key"], 0.0), 6)
+        return ranked[:limit]
 
     # --- Appendix A.3 Evidence Store ---
     def record_evidence(

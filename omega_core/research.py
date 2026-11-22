@@ -59,19 +59,32 @@ def is_date_sensitive(question: str) -> bool:
     return bool(DATE_SENSITIVE_RX.search(question))
 
 
+STOPWORDS = {
+    "the", "and", "for", "with", "what", "how", "does", "from", "that", "this",
+    "are", "was", "were", "into", "about", "best", "latest", "newest", "current",
+    "benchmark", "comparison", "guide", "tutorial", "review", "2025", "2026",
+}
+
+
+def extract_anchor_terms(question: str, max_terms: int = 3) -> str:
+    """Trim long questions to top 2-3 anchor keywords for strict-AND engines (GitHub, HN, Gitee)."""
+    tokens = re.findall(r"[A-Za-z0-9\u4e00-\u9fff][A-Za-z0-9._\u4e00-\u9fff-]{1,}", question)
+    anchors = [t for t in tokens if t.lower() not in STOPWORDS]
+    dedup = list(dict.fromkeys(anchors))[:max_terms]
+    return " ".join(dedup) if dedup else question.strip()[:60]
+
+
 def expand_chinese_query(question: str) -> str:
-    """Build an idiomatic Chinese companion query for CN GitHub / V2EX / Gitee / CN search."""
+    """Build a tight 2-3 term Chinese query so strict-AND CN GitHub / Gitee actually return high-signal hits."""
     if re.search(r"[\u4e00-\u9fff]", question):
-        return question
-    zh_bits: list[str] = []
+        return extract_anchor_terms(question, max_terms=3)
+    zh_anchor = "优化"
     for rx, zh in ZH_TERM_MAP:
         if rx.search(question):
-            zh_bits.append(zh)
-    # Keep salient English technical identifiers (model names, package names, numbers)
-    tech_tokens = re.findall(r"\b[A-Za-z0-9][A-Za-z0-9._-]{2,}\b", question)[:4]
-    if not zh_bits:
-        zh_bits.append("原理 实战 踩坑 评测")
-    return " ".join(tech_tokens + zh_bits[:2])
+            zh_anchor = zh.split()[0]
+            break
+    core_en = extract_anchor_terms(question, max_terms=2)
+    return f"{core_en} {zh_anchor}".strip()
 
 
 def _http_get_json(url: str, timeout: int = 8) -> Any:
@@ -352,23 +365,25 @@ def live_discover_multi_index(
     date_sensitive: bool,
     deep_indexes: bool = False,
 ) -> tuple[list[dict[str, str]], list[str]]:
-    """Run parallel high-signal multi-index discovery (EN + CN + GitHub + Hostile Failure Lane)."""
-    failure_q = f"{query} regression OR broken OR benchmark OR issue"
+    """Run parallel high-signal multi-index discovery (trimmed anchors for strict-AND GitHub/HN/CN; full query for academic)."""
+    anchor_q = extract_anchor_terms(query, max_terms=3)
+    anchor_2 = extract_anchor_terms(query, max_terms=2)
+    failure_q = f"{anchor_2} issue OR broken OR regression"
     tasks: list[tuple[str, Any, tuple]] = [
-        ("hn_stories_pts5", _discover_hn_stories, (query, date_sensitive, 5)),
+        ("hn_stories_pts5", _discover_hn_stories, (anchor_2, date_sensitive, 5)),
         ("hn_comments", _discover_hn_comments, (failure_q, 4)),
-        ("github_repos_en", _discover_github_repos, (query,)),
+        ("github_repos_en", _discover_github_repos, (anchor_q,)),
         ("github_repos_cn", lambda q: _discover_github_repos(q, chinese=True, limit=4), (query,)),
-        ("github_issues", _discover_github_issues, (query, 4)),
+        ("github_issues", _discover_github_issues, (anchor_2, 4)),
         ("arxiv", _discover_arxiv, (query, 4)),
-        ("ddg_instant", _discover_ddg, (query, 2)),
+        ("ddg_instant", _discover_ddg, (anchor_q, 2)),
     ]
     if deep_indexes:
         tasks += [
             ("gitee_cn", _discover_gitee_cn, (query, 4)),
             ("openalex", _discover_openalex, (query, 4)),
-            ("stackoverflow", _discover_stackexchange, (query, 4)),
-            ("europe_pmc", _discover_europe_pmc, (query, 3)),
+            ("stackoverflow", _discover_stackexchange, (anchor_q, 4)),
+            ("europe_pmc", _discover_europe_pmc, (anchor_q, 3)),
         ]
 
     discovered: list[dict[str, str]] = []

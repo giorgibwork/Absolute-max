@@ -226,6 +226,63 @@ class OmegaCoreTests(unittest.TestCase):
         self.assertFalse(gcfg["showTags"])
         self.assertTrue(os.path.exists(os.path.join(vdir, "OMEGA-APEX.md")))
 
+    def test_v62_codegraph_graphrag_bavar_dream_and_anchor_trim(self):
+        from omega_core.bavar import allocate_verification, generate_code_mode_stubs, verified_calc
+        from omega_core.codegraph import CodeGraph
+        from omega_core.dream import DreamEngine
+        from omega_core.research import expand_chinese_query, extract_anchor_terms
+
+        # 1. Trimmed anchor queries for strict-AND engines (2-3 terms max!)
+        anc = extract_anchor_terms("SQLite FTS5 hybrid search benchmark 2026", max_terms=2)
+        self.assertEqual(anc, "SQLite FTS5")
+        zh = expand_chinese_query("SQLite FTS5 hybrid search benchmark")
+        self.assertLessEqual(len(zh.split()), 4)
+        self.assertRegex(zh, r"[\u4e00-\u9fff]")
+
+        # 2. Vectorless AST CodeGraph + Recursive CTE callers
+        src_dir = os.path.join(self.tmpdir, "mini_repo")
+        os.makedirs(src_dir, exist_ok=True)
+        with open(os.path.join(src_dir, "mod.py"), "w", encoding="utf-8") as f:
+            f.write("def helper(x):\n    return x + 1\n\ndef entry():\n    return helper(41)\n")
+        cg = CodeGraph(self.paths)
+        idx = cg.index_directory(src_dir)
+        self.assertEqual(idx["files_indexed"], 1)
+        self.assertGreaterEqual(idx["total_symbols"], 2)
+        hits = cg.find_symbol("helper")
+        self.assertEqual(hits[0]["name"], "helper")
+        callers = cg.trace_callers("helper", max_hops=2)
+        self.assertTrue(any(c["caller_symbol"] == "entry" for c in callers))
+
+        # 3. SQLite Recursive-CTE GraphRAG + Temporal Decay + RRF
+        kf = KnowledgeFabric(self.paths)
+        kf.add_memory("g/root", "Polymarket pUSD rail", task_family="finance", tags="polymarket,polygon")
+        kf.add_memory("g/hop1", "Native USDC swap zero gas", task_family="finance", tags="polygon")
+        kf.link_memories("g/root", "depends_on", "g/hop1", weight=0.9)
+        gres = kf.graph_search("pUSD", task_family="finance", hops=2)
+        keys = [r["key"] for r in gres]
+        self.assertIn("g/root", keys)
+        self.assertIn("g/hop1", keys)
+
+        # 4. BAVAR adaptive verification + Code Mode stubs + FinVeriQA safe AST calc
+        self.assertEqual(allocate_verification("READ")["tier"], "DETERMINISTIC_ONLY")
+        self.assertEqual(allocate_verification("SPEND", irreversible=True)["tier"], "CROSS_FAMILY_JURY")
+        self.assertEqual(allocate_verification("SPEND", irreversible=True, budget_remaining=0.02)["tier"], "ABSTAIN_CLARIFY")
+        stubs = generate_code_mode_stubs([{"name": "vault_search", "params": "q: str", "returns": "{hits: list}"}])
+        self.assertIn("returns: {hits: list}", stubs)
+        calc = verified_calc("(0.62 * 2.1 - 1) / (2.1 - 1)", label="kelly_test", paths=self.paths)
+        self.assertAlmostEqual(calc["value"], 0.27454545, places=5)
+        with self.assertRaises(ValueError):
+            verified_calc("__import__('os').system('id')", paths=self.paths)
+
+        # 5. Async Dreaming + Failure-Signature clustering
+        with open(self.paths.audit_log, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": 1700000001, "tool": "run_command", "ok": False, "err": "HTTP 403 on /tmp/12345", "cmd_preview": "curl x"}) + "\n")
+            f.write(json.dumps({"ts": 1700000002, "tool": "run_command", "ok": False, "err": "HTTP 403 on /tmp/99999", "cmd_preview": "curl y"}) + "\n")
+        de = DreamEngine(self.paths)
+        dr = de.run_dream(sync_obsidian=False, index_code=False)
+        self.assertTrue(dr["ok"])
+        self.assertEqual(dr["failures"]["total_signatures"], 1)
+
     def test_full_10_mission_acceptance_suite(self):
         rep = run_suite()
         self.assertEqual(rep["passed"], 10, msg=json.dumps(rep, indent=2))
