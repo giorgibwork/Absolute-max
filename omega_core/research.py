@@ -271,21 +271,22 @@ def _discover_stackexchange(query: str, limit: int = 4) -> list[dict[str, str]]:
 
 def _discover_europe_pmc(query: str, limit: int = 3) -> list[dict[str, str]]:
     """Europe PMC / PubMed free JSON API (biomedical, strength, nutrition, biomechanics)."""
-    url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/search?query={urllib.parse.quote(query)}&format=json&pageSize={limit}"
+    url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/search?query={urllib.parse.quote(query)}&format=json&resultType=core&pageSize={limit}"
     data = _http_get_json(url, timeout=8)
     if not isinstance(data, dict):
         return []
     out = []
     for r in (data.get("resultList") or {}).get("result", []):
-        pmid = r.get("pmid") or r.get("pmcid") or ""
-        u = f"https://europepmc.org/article/MED/{pmid}" if pmid else ""
+        pmid = r.get("pmid") or ""
+        u = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else ""
         if u:
             out.append(
                 {
                     "lane": "academic",
-                    "source": f"europe_pmc(cites={r.get('citedByCount', 0)})",
+                    "source": f"pubmed_epmc(cites={r.get('citedByCount', 0)})",
                     "url": u,
                     "title": str(r.get("title") or "")[:180],
+                    "snippet": str(r.get("abstractText") or r.get("title") or "")[:500],
                     "published_at": str(r.get("pubYear") or ""),
                 }
             )
@@ -535,10 +536,10 @@ class ResearchEngine:
         if not offline and urls_to_fetch and os.path.exists(web_gather):
             try:
                 r = subprocess.run(
-                    ["python3", web_gather, *urls_to_fetch[:10], "--max-chars", "2200"],
+                    ["python3", web_gather, *urls_to_fetch[:10], "--max-chars", "2200", "--timeout", "8"],
                     capture_output=True,
                     text=True,
-                    timeout=cfg["timeout_s"],
+                    timeout=min(30, cfg["timeout_s"]),
                 )
                 if r.returncode == 0 and r.stdout.strip():
                     if t_first is None:

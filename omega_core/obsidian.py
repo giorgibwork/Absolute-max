@@ -48,7 +48,7 @@ GRAPH_CONFIG: dict[str, Any] = {
     "search": "",
     "showTags": False,
     "showAttachments": False,
-    "hideUnresolved": False,
+    "hideUnresolved": True,
     "showOrphans": False,
     "collapse-color-groups": False,
     "colorGroups": [
@@ -117,9 +117,18 @@ def _slug(s: str) -> str:
 def _write_text(path: str, content: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(content)
-    os.replace(tmp, path)
+    for attempt in range(3):
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(tmp, path)
+            return
+        except OSError:
+            if attempt == 2:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                return
+            time.sleep(0.05 * (attempt + 1))
 
 
 def _write_json(path: str, data: dict[str, Any], force: bool = False) -> None:
@@ -242,19 +251,29 @@ class ObsidianSync:
         now_str = time.strftime("%Y-%m-%d %H:%M")
 
         nodes_dir = os.path.join(self.vault_dir, "Nodes")
-        # Clear previously exported Nodes so deleted/stale exports never linger as ghosts
-        for fn in os.listdir(nodes_dir):
+        preserved_dossiers: list[str] = []
+        # Clear previously exported Nodes EXCEPT Dossier-* research reports (preserve & link them!)
+        for fn in sorted(os.listdir(nodes_dir)):
             fp = os.path.join(nodes_dir, fn)
-            if os.path.isfile(fp) and fn.endswith(".md"):
+            if not (os.path.isfile(fp) and fn.endswith(".md")):
+                continue
+            if fn.startswith("Dossier-"):
+                preserved_dossiers.append(fn[:-3])
+                continue
+            try:
                 with open(fp, "r", encoding="utf-8", errors="replace") as f:
-                    if "omega_exported: true" in f.read(300):
-                        os.remove(fp)
+                    head = f.read(300)
+                if "omega_exported: true" in head:
+                    os.remove(fp)
+            except OSError:
+                # Transient Android FUSE lock while Obsidian is open; safe to overwrite in place
+                continue
 
         nodes_written = 0
         hubs: dict[str, tuple[str, list[str]]] = {
             "Hub-OMEGA-OS": ("os", []),
             "Hub-Models-Workforce": ("models", []),
-            "Hub-Research-Alpha": ("research", []),
+            "Hub-Research-Alpha": ("research", list(preserved_dossiers)),
             "Hub-POCO-Vermeer": ("vermeer", []),
             "Hub-Finance-Markets": ("finance", []),
             "Hub-Life-Training": ("life", []),
@@ -324,17 +343,23 @@ class ObsidianSync:
         finally:
             conn.close()
 
+        # Pre-compute shared concepts (>=2 notes) so we NEVER emit unresolved grey ghost links!
+        mem_records = []
         for m in mems:
             prefix = m["key"].split("/", 1)[0].lower()
             hub_name, dom_tag = DOMAIN_MAP.get(prefix, ("Hub-OMEGA-OS", "os"))
             nname = f"Mem-{_slug(m['key'].replace('/', '-'))}"
-            hubs[hub_name][1].append(nname)
             tags = [t.strip() for t in m["tags"].split(",") if t.strip()][:4]
-            c_refs = []
-            for t in tags:
-                ts = _slug(t)
+            tag_slugs = [_slug(t) for t in tags]
+            for ts in tag_slugs:
                 concept_links.setdefault(ts, []).append(nname)
-                c_refs.append(f"[[Concept-{ts}]]")
+            mem_records.append((m, hub_name, dom_tag, nname, tag_slugs))
+
+        valid_concepts = {ts for ts, linked in concept_links.items() if len(set(linked)) >= 2}
+
+        for m, hub_name, dom_tag, nname, tag_slugs in mem_records:
+            hubs[hub_name][1].append(nname)
+            c_refs = [f"[[Concept-{ts}]]" for ts in tag_slugs if ts in valid_concepts]
             write_node(
                 nname,
                 dom_tag,
@@ -399,15 +424,156 @@ class ObsidianSync:
                 f"- **Source:** {ev['locator']} (`{ev['support_type']}` / `{ev['verification_status']}`)\n",
             )
 
-        # 7. High-Signal Curated Nodes from Local Corpora (Chinese GitHub + Trading + Strategy + AI)
+        # 7. High-Signal Curated Nodes from Local Corpora + Full Host Knowledge (Tools, Skills, Bounties, Contracts, Reports)
         corpus_total = 0
         if include_corpus_highlights:
-            mem_dir = os.path.expanduser("~/.antigem/memory")
+            home = os.path.expanduser("~")
+            mem_dir = os.path.join(home, ".antigem", "memory")
+
+            # 7a. All executable ~/tools/*.py utilities
+            tools_dir = os.path.join(home, "tools")
+            tool_nodes: list[str] = []
+            if os.path.isdir(tools_dir):
+                for fn in sorted(os.listdir(tools_dir)):
+                    if not fn.endswith(".py") or ".bak" in fn:
+                        continue
+                    fp = os.path.join(tools_dir, fn)
+                    doc = ""
+                    try:
+                        with open(fp, "r", encoding="utf-8", errors="replace") as tf:
+                            head = tf.read(500)
+                        dm = re.search(r'"""(.*?)"""', head, re.DOTALL)
+                        doc = dm.group(1).strip()[:280] if dm else "On-device executable Python tool."
+                    except Exception:
+                        doc = "On-device executable Python tool."
+                    tname = f"Tool-{_slug(fn[:-3])}"
+                    tool_nodes.append(tname)
+                    write_node(tname, "os", f"# ~/tools/{fn}\n\n- **Cluster:** [[Cluster-Tools-Suite]] · [[Hub-OMEGA-OS]]\n\n{doc}\n")
+                if tool_nodes:
+                    hubs["Hub-OMEGA-OS"][1].append("Cluster-Tools-Suite")
+                    write_node(
+                        "Cluster-Tools-Suite",
+                        "os",
+                        f"# On-Device Tools Suite ({len(tool_nodes)} Scripts)\n\nHub: [[Hub-OMEGA-OS]] · [[OMEGA-APEX]]\n\n"
+                        + "\n".join(f"- [[{x}]]" for x in tool_nodes),
+                    )
+
+            # 7b. All installed ~/.gemini/config/skills/*/SKILL.md skills
+            skills_root = os.path.join(home, ".gemini", "config", "skills")
+            skill_nodes: list[str] = []
+            if os.path.isdir(skills_root):
+                for sd in sorted(os.listdir(skills_root)):
+                    sf = os.path.join(skills_root, sd, "SKILL.md")
+                    if not os.path.isfile(sf):
+                        continue
+                    try:
+                        with open(sf, "r", encoding="utf-8", errors="replace") as f:
+                            stxt = f.read(1200)
+                    except Exception:
+                        continue
+                    sname = f"Skill-{_slug(sd)}"
+                    skill_nodes.append(sname)
+                    write_node(sname, "os", f"# Skill: {sd}\n\n- **Cluster:** [[Cluster-Skills]] · [[Hub-OMEGA-OS]]\n\n{stxt[:650]}\n")
+                if skill_nodes:
+                    hubs["Hub-OMEGA-OS"][1].append("Cluster-Skills")
+                    write_node(
+                        "Cluster-Skills",
+                        "os",
+                        f"# Installed Skills ({len(skill_nodes)})\n\nHub: [[Hub-OMEGA-OS]] · [[OMEGA-APEX]]\n\n"
+                        + "\n".join(f"- [[{x}]]" for x in skill_nodes),
+                    )
+
+            # 7c. All live GitHub Bounties from bounties.db
+            bounties_db = os.path.join(mem_dir, "bounties.db")
+            bounty_nodes: list[str] = []
+            if os.path.isfile(bounties_db):
+                try:
+                    bc = sqlite3.connect(bounties_db, timeout=3.0)
+                    brows = bc.execute(
+                        "SELECT url, repo, number, title, payout_raw, comments, labels, score, substr(body_snippet, 1, 400) FROM bounties ORDER BY score DESC LIMIT 50"
+                    ).fetchall()
+                    bc.close()
+                    for url, repo, num, title, pay, cmts, labels, score, snip in brows:
+                        bname = f"Bounty-{_slug(repo.split('/')[-1])}-{num}"
+                        bounty_nodes.append(bname)
+                        write_node(
+                            bname,
+                            "finance",
+                            f"# {repo}#{num}: {title[:110]}\n\n"
+                            f"- **Cluster:** [[Cluster-GitHub-Bounties]] · [[Hub-Finance-Markets]]\n"
+                            f"- **Score:** `{score:.1f}` | **Payout:** `{pay}` | **Comments:** `{cmts}`\n"
+                            f"- **Labels:** `{labels}`\n"
+                            f"- **URL:** {url}\n\n"
+                            f"{snip}\n",
+                        )
+                    if bounty_nodes:
+                        hubs["Hub-Finance-Markets"][1].append("Cluster-GitHub-Bounties")
+                        write_node(
+                            "Cluster-GitHub-Bounties",
+                            "finance",
+                            f"# GitHub Bounty Leads ({len(bounty_nodes)} Tracked)\n\nHub: [[Hub-Finance-Markets]] · [[OMEGA-APEX]]\n\n"
+                            + "\n".join(f"- [[{x}]]" for x in bounty_nodes),
+                        )
+                except Exception:
+                    pass
+
+            # 7d. All v5.14 Contracts & Plugins (archived architectural specs)
+            v514_root = os.path.join(self.paths.repo_root, "docs", "v5.14", "absolute-max-os-v5.14")
+            contract_nodes: list[str] = []
+            for sub_dir in ("02-contracts", "03-plugins"):
+                cd = os.path.join(v514_root, sub_dir)
+                if not os.path.isdir(cd):
+                    continue
+                for fn in sorted(os.listdir(cd)):
+                    if not fn.endswith(".md"):
+                        continue
+                    try:
+                        with open(os.path.join(cd, fn), "r", encoding="utf-8", errors="replace") as f:
+                            ctxt = f.read(700)
+                    except Exception:
+                        continue
+                    cname = f"Spec-{_slug(fn[:-3])}"
+                    contract_nodes.append(cname)
+                    write_node(cname, "research", f"# {fn[:-3]}\n\n- **Cluster:** [[Cluster-V514-Contracts]] · [[Hub-Research-Alpha]]\n\n{ctxt}\n")
+            if contract_nodes:
+                hubs["Hub-Research-Alpha"][1].append("Cluster-V514-Contracts")
+                hubs["Hub-OMEGA-OS"][1].append("Cluster-V514-Contracts")
+                write_node(
+                    "Cluster-V514-Contracts",
+                    "research",
+                    f"# Archived v5.14 Contracts & Plugins ({len(contract_nodes)})\n\nHubs: [[Hub-Research-Alpha]] · [[Hub-OMEGA-OS]]\n\n"
+                    + "\n".join(f"- [[{x}]]" for x in contract_nodes),
+                )
+
+            # 7e. Saved local Markdown research reports (~/tools/*.md + TSB audit)
+            report_files = []
+            if os.path.isdir(tools_dir):
+                report_files += [os.path.join(tools_dir, f) for f in sorted(os.listdir(tools_dir)) if f.endswith(".md")]
+            tsb_audit = os.path.join(mem_dir, "user_audit_tsb_thread_2026-11-16.md")
+            if os.path.isfile(tsb_audit):
+                report_files.append(tsb_audit)
+            for rf in report_files:
+                try:
+                    with open(rf, "r", encoding="utf-8", errors="replace") as f:
+                        rtxt = f.read(1400).strip()
+                except Exception:
+                    continue
+                if len(rtxt) < 30:
+                    continue
+                base = os.path.basename(rf)[:-3]
+                is_tsb = "tsb" in base.lower()
+                rtag = "vermeer" if is_tsb else "research"
+                rhub = "Hub-POCO-Vermeer" if is_tsb else "Hub-Research-Alpha"
+                rname = f"Report-{_slug(base)}"
+                hubs[rhub][1].append(rname)
+                write_node(rname, rtag, f"# Report: {base}\n\n- **Hub:** [[{rhub}]] · [[OMEGA-APEX]]\n\n{rtxt}\n")
+
+            # 7f. Curated High-Signal Local Corpus Clusters (160 docs across 4 SQLite corpora, 0 pts=0 noise)
             corpora = [
-                ("cn_vermeer_corpus.db", "Cluster-CN-Vermeer-GitHub", "Hub-POCO-Vermeer", "vermeer", 28),
-                ("trading_research_corpus.db", "Cluster-Trading-Alpha", "Hub-Finance-Markets", "finance", 24),
-                ("strategy_research_corpus.db", "Cluster-Quant-Strategy", "Hub-Finance-Markets", "finance", 24),
-                ("research_corpus.db", "Cluster-AI-Harness-Papers", "Hub-Research-Alpha", "research", 24),
+                ("cn_vermeer_corpus.db", "Cluster-CN-Vermeer-GitHub", "Hub-POCO-Vermeer", "vermeer", 45),
+                ("trading_research_corpus.db", "Cluster-Trading-Alpha", "Hub-Finance-Markets", "finance", 40),
+                ("strategy_research_corpus.db", "Cluster-Quant-Strategy", "Hub-Finance-Markets", "finance", 40),
+                ("research_corpus.db", "Cluster-AI-Harness-Papers", "Hub-Research-Alpha", "research", 35),
             ]
             for db_name, cluster_name, domain_hub, dom_tag, limit_n in corpora:
                 db_path = os.path.join(mem_dir, db_name)
