@@ -1,0 +1,1 @@
+- 2026-11-17: v5.7.0 — Harness Anatomy invariants (2611.19960), CoReMem prospective anchors (2611.17316), BAVAR budgeted verification. Implemented into live contracts + AGENTS.md; not backlog-only.

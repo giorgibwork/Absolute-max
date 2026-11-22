@@ -1,0 +1,166 @@
+{
+  "version": "6.0.0-apex",
+  "host": "AntiGem-Android-POCO-F6-Pro",
+  "updated_at": "2026-11-22",
+  "constitution_status": "DRAFT_NOT_RATIFIED",
+  "research_intake_freeze": true,
+  "subsystems": [
+    {
+      "id": "OAPX-SYS-01",
+      "plane": "Control",
+      "name": "Constitutional Kernel",
+      "owner": "omega_core/kernel.py",
+      "adapters": ["adapters/antigem/pre_tool_guard.py", "~/.gemini/config/hooks.json"],
+      "test_refs": ["tests/test_omega_core.py", "omega_core/suite.py#Mission-H"],
+      "status": "QUALIFIED",
+      "known_limitations": [
+        "Supreme Constitution v1.0 remains draft until operator explicitly ratifies.",
+        "Live AntiGem config.json retains EAGER auto-execution for local tools; consequential/spend/destructive actions are intercepted by PreToolUse hook."
+      ]
+    },
+    {
+      "id": "OAPX-SYS-02",
+      "plane": "Control",
+      "name": "Intent Compiler",
+      "owner": "omega_core/mission.py#MissionKernel.compile_intent",
+      "adapters": ["omega_core/cli.py#mission-new"],
+      "test_refs": ["omega_core/suite.py#Mission-B"],
+      "status": "QUALIFIED",
+      "known_limitations": [
+        "Deterministic structured compiler; natural-language auto-decomposition still relies on host LLM."
+      ]
+    },
+    {
+      "id": "OAPX-SYS-03",
+      "plane": "Control",
+      "name": "Mission Kernel + Pro2 Problem State",
+      "owner": "omega_core/mission.py",
+      "adapters": ["omega_core/cli.py", "adapters/antigem/session_start.py"],
+      "test_refs": ["omega_core/suite.py#Mission-B", "omega_core/suite.py#Mission-G"],
+      "status": "QUALIFIED",
+      "known_limitations": [
+        "Operator or agent must create a mission via `omega mission new` for cross-session persistence."
+      ]
+    },
+    {
+      "id": "OAPX-SYS-04",
+      "plane": "Control",
+      "name": "Human Command Interface",
+      "owner": "omega_core/cli.py",
+      "adapters": ["~/.local/bin/omega"],
+      "test_refs": ["omega status", "omega suite"],
+      "status": "IMPLEMENTED",
+      "known_limitations": [
+        "CLI interface is live and verified; dedicated AntiGem Mini App GUI dashboard not yet built."
+      ]
+    },
+    {
+      "id": "OAPX-SYS-05",
+      "plane": "Cognition",
+      "name": "Cognitive Runtime",
+      "owner": "agy 1.5.13 + omega_core/mission.py",
+      "adapters": ["~/.gemini/config/hooks.json"],
+      "test_refs": ["omega_core/suite.py#Mission-A", "omega_core/suite.py#Mission-B"],
+      "status": "PARTIAL",
+      "known_limitations": [
+        "Core turn loop is hosted by AntiGem/agy; task-graph auto-scheduler is CLI/workflow driven rather than background daemon."
+      ]
+    },
+    {
+      "id": "OAPX-SYS-06",
+      "plane": "Cognition",
+      "name": "Intelligence Fabric (Model Qualification & Routing)",
+      "owner": "omega_core/fabric.py",
+      "adapters": ["omega_core/cli.py#models"],
+      "test_refs": ["omega_core/suite.py#Mission-E", "omega models qualify (live 3/3)"],
+      "status": "QUALIFIED",
+      "known_limitations": [
+        "3 core models live-qualified on POCO F6 Pro (claude-opus-5-5-medium 8.4s, gemini-4-neon-high 10.9s, gemini-4-hydrogen-low 13.1s); remaining catalog models remain UNKNOWN until probed."
+      ]
+    },
+    {
+      "id": "OAPX-SYS-07",
+      "plane": "Knowledge",
+      "name": "Context Compiler",
+      "owner": "omega_core/memory.py#KnowledgeFabric.compile_context",
+      "adapters": ["adapters/antigem/session_start.py"],
+      "test_refs": ["omega_core/suite.py#Mission-J"],
+      "status": "QUALIFIED",
+      "known_limitations": [
+        "Uses deterministic character budgeting (5600 char default) rather than model-specific tokenizer counts."
+      ]
+    },
+    {
+      "id": "OAPX-SYS-08",
+      "plane": "Knowledge",
+      "name": "Knowledge & Evidence Fabric (Scoped-ORC + GrepMem + Evidence Store)",
+      "owner": "omega_core/memory.py",
+      "adapters": ["adapters/antigem/memory_vault_adapter.py", "~/tools/memory_vault.py"],
+      "test_refs": ["tests/test_omega_core.py", "omega_core/suite.py#Mission-C", "omega_core/suite.py#Mission-D"],
+      "status": "QUALIFIED",
+      "known_limitations": [
+        "Existing 18 legacy memories default to task_family='global' for backward compatibility; new writes default to scoped."
+      ]
+    },
+    {
+      "id": "OAPX-SYS-09",
+      "plane": "Capability & Resources",
+      "name": "Capability Gateway + Weakest-Agent Rings",
+      "owner": "omega_core/kernel.py",
+      "adapters": ["adapters/antigem/pre_tool_guard.py"],
+      "test_refs": ["tests/test_omega_core.py", "omega_core/suite.py#Mission-F"],
+      "status": "QUALIFIED",
+      "known_limitations": [
+        "Subagent ring propagation relies on OMEGA_CALLER_RING env var or explicit delegate_ring() calls until host runtime adds native ring metadata."
+      ]
+    },
+    {
+      "id": "OAPX-SYS-10",
+      "plane": "Capability & Resources",
+      "name": "Resource Intelligence",
+      "owner": "omega_core/fabric.py#host_resources",
+      "adapters": ["omega_core/cli.py#status"],
+      "test_refs": ["omega_core/suite.py#Mission-J", "omega status"],
+      "status": "IMPLEMENTED",
+      "known_limitations": [
+        "Measures live RAM, disk, DB size, and per-call latency/$0.00 cost; plan-quota percentages come from jarvis_get_usage MCP rather than local DB."
+      ]
+    },
+    {
+      "id": "OAPX-SYS-11",
+      "plane": "Assurance",
+      "name": "Assurance & 10-Mission Evaluation Suite",
+      "owner": "omega_core/suite.py",
+      "adapters": ["omega_core/cli.py#suite", "~/tools/eval_harness.py"],
+      "test_refs": ["BASELINE.md", "tests/test_omega_core.py"],
+      "status": "QUALIFIED",
+      "known_limitations": [
+        "Suite runs deterministically offline in <0.6s using a stub invoker for Mission E; live model probes run separately via `omega models qualify` to preserve 5-hour quota."
+      ]
+    },
+    {
+      "id": "OAPX-SYS-12",
+      "plane": "Assurance",
+      "name": "Reliability, Checkpoints & Observability",
+      "owner": "omega_core/mission.py + adapters/antigem/post_tool_audit.py",
+      "adapters": ["~/tools/hooks/post_tool_audit.py", "~/tools/checkpoint.py", "~/tools/trace_miner.py"],
+      "test_refs": ["omega_core/suite.py#Mission-G"],
+      "status": "QUALIFIED",
+      "known_limitations": [
+        "Mission checkpoints restore SQLite state + verify artifact hashes; arbitrary external network side effects cannot be rolled back automatically."
+      ]
+    },
+    {
+      "id": "OAPX-SYS-13",
+      "plane": "Evolution",
+      "name": "Evolution Laboratory (SIM + RRSI + ModularRSI)",
+      "owner": "omega_core/evo.py",
+      "adapters": ["omega_core/suite.py#Mission-I"],
+      "test_refs": ["tests/test_omega_core.py", "omega_core/suite.py#Mission-I"],
+      "status": "QUALIFIED",
+      "known_limitations": [
+        "Isolated sandbox candidate evaluation, RRSI annealing, SIM logging, and PREPARE_ONLY proposals are verified; autonomous candidate generation loop deferred until live workload traces show specific bottlenecks."
+      ]
+    }
+  ]
+}

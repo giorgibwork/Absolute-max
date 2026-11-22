@@ -1,0 +1,1 @@
+- 2026-11-18 (pm): v5.9.0 — Soteria (2611.17880), LEDGER (2611.20927), ActiveSec (2611.13960). Implemented into live contracts + AGENTS.md; not backlog-only.

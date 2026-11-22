@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AbsoluteMaxOSPortableCheckpointV5_1",
+  "type": "object",
+  "required": [
+    "version",
+    "timestamp_utc",
+    "active_goal",
+    "terminal_gate_S",
+    "verified_facts",
+    "checkpoint_sha256"
+  ],
+  "properties": {
+    "version": {
+      "const": "5.1.0"
+    },
+    "timestamp_utc": {
+      "type": "string"
+    },
+    "active_goal": {
+      "type": "string"
+    },
+    "terminal_gate_S": {
+      "enum": [
+        0,
+        1
+      ]
+    },
+    "verified_facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "key",
+          "value",
+          "source_class",
+          "origin_uri",
+          "sha256"
+        ]
+      }
+    },
+    "quarantined_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "checkpoint_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

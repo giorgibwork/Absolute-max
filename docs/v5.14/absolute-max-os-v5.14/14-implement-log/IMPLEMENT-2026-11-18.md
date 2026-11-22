@@ -1,0 +1,1 @@
+- 2026-11-18: v5.8.0 — FCP Formal Context Protocol (2611.21679), Self-Improving Harness unifying framework (2611.22299), HEAMS holistic memory evaluation (2611.20144). Implemented into live contracts + AGENTS.md; not backlog-only.
