@@ -18,6 +18,7 @@ from omega_core.fabric import IntelligenceFabric
 from omega_core.kernel import evaluate_tool_call
 from omega_core.memory import KnowledgeFabric
 from omega_core.mission import MissionKernel
+from omega_core.obsidian import DEFAULT_VAULT_DIR, ObsidianSync
 from omega_core.research import ResearchEngine
 from omega_core.suite import run_suite
 
@@ -159,6 +160,14 @@ def cmd_models(args) -> None:
         _jprint(fab.select_chain(args.task))
 
 
+def cmd_obsidian(args) -> None:
+    obs = ObsidianSync(vault_dir=args.vault)
+    if args.action == "sync":
+        _jprint(obs.sync_all(force_config=args.force_config))
+    elif args.action == "ingest":
+        _jprint(obs.ingest_user_notes())
+
+
 def cmd_research(args) -> None:
     eng = ResearchEngine()
     _jprint(
@@ -173,6 +182,7 @@ def cmd_research(args) -> None:
             web_ground=args.web_ground,
             challenge=True if args.challenge else (False if args.no_challenge else None),
             offline=args.offline,
+            export_obsidian=args.obsidian,
         )
     )
 
@@ -355,7 +365,17 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--challenge", action="store_true", help="Force one-pass cross-family adversarial challenge")
     pr.add_argument("--no-challenge", action="store_true", help="Skip cross-family adversarial challenge")
     pr.add_argument("--offline", action="store_true", help="Prior memory + local corpus only")
+    pr.add_argument("--obsidian", action="store_true", help="Export research dossier to Obsidian vault")
     pr.set_defaults(func=cmd_research)
+
+    # obsidian
+    po = sub.add_parser("obsidian", help="Two-way Obsidian Knowledge Graph & Canvas sync")
+    po.add_argument("--vault", default=DEFAULT_VAULT_DIR)
+    po_sub = po.add_subparsers(dest="action", required=True)
+    po_sync = po_sub.add_parser("sync")
+    po_sync.add_argument("--force-config", action="store_true", help="Overwrite .obsidian graph/theme settings")
+    po_sub.add_parser("ingest")
+    po.set_defaults(func=cmd_obsidian)
 
     # suite
     psu = sub.add_parser("suite", help="Run 10-Mission Integrated Acceptance Suite (A-J)")

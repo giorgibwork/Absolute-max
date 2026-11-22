@@ -37,6 +37,11 @@ STATUS_RX = re.compile(
     re.IGNORECASE,
 )
 
+OBSIDIAN_RX = re.compile(
+    r"\b(?:obsidian|sync\s+my\s+(?:vault|notes)|update\s+my\s+vault|inbox\s+notes|knowledge\s+graph)\b",
+    re.IGNORECASE,
+)
+
 DEBUG_RX = re.compile(
     r"\b(?:debug|broken|not\s+working|fix\s+this|timeout|502|503|crash|bug|patch|error)\b",
     re.IGNORECASE,
@@ -92,6 +97,17 @@ def classify_user_intent(user_input: str) -> list[dict[str, str]]:
                 "directive": (
                     "[Omega Intent -> Live Status] Silently run `omega dashboard` (and `eval_harness.py` if tools health asked) "
                     "and summarize plainly."
+                ),
+            }
+        )
+
+    if OBSIDIAN_RX.search(txt):
+        routes.append(
+            {
+                "intent": "OBSIDIAN_SYNC",
+                "directive": (
+                    "[Omega Intent -> Obsidian Vault] Silently run `omega obsidian sync` (two-way ingest from 08-Inbox/09-Config "
+                    "+ rebuild /sdcard/Documents/OmegaVault Knowledge Graph & Canvas) and report plainly."
                 ),
             }
         )

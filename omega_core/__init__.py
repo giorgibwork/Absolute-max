@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-VERSION = "6.0.0-apex"
+VERSION = "6.1.0-apex"
 
 # Capability Rings (Weakest-Agent Safety Invariant)
 R0_READONLY = 0

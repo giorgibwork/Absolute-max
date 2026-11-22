@@ -1,14 +1,14 @@
-"""Adaptive Research Engine (FAST / STANDARD / DEEP) — Doctrine Part V Implementation.
+"""Adaptive Multi-Lingual Research Engine (v6.1 — Chinese-for-All + GitHub + 12+ High-Signal Indexes).
 
-Implements:
-- Date-sensitivity detection (prevents stale training-cutoff answers on current topics)
-- Step 2: Prior knowledge & Evidence Store lookup before rediscovery
-- Step 4: Parallel $0.00 live web discovery (HN Algolia, arXiv, DuckDuckGo Instant,
-  plus optional live `agy` search_web grounding) + URL deduplication
-- Step 7: Selective full-text fetch via ~/tools/web_gather.py -> Appendix A.3 Evidence Store
-- Section 20: Anti-loop content-hash / URL freshness verification cache
-- Section 20/21: One-pass cross-family adversarial challenge (grounded ONLY in live evidence)
-  + explicit stop_reason + honest readiness_status (VERIFIED / PARTIAL / PROVISIONAL / UNVERIFIED)
+Implements Doctrine Part V + Giorgi's Non-Consensus & Chinese-for-Everything standards:
+- 4 Orthogonal Search Lanes ($0.00, pure Python stdlib + gh CLI):
+  1. Primary Code & Issues Lane: GitHub Issues/PRs (sorted by reactions/comments) + GitHub Repos
+  2. Chinese Deep Ecosystem Lane (ALL domains): CN GitHub + V2EX + Gitee + auto-expanded Chinese query terms
+  3. Academic & Technical Papers Lane: arXiv + OpenAlex (250M+ works, citation-sorted) + Semantic Scholar / Europe PMC + StackExchange
+  4. Practitioner & Hostile Failure Lane: HN Stories (points >= 5 — zero pts=0 spam!) + HN Comments + Failure/Regression query expansion + DDG Instant
+- Date-sensitivity guard + Section 20 Anti-Loop verification cache
+- Optional 3-Family Asymmetric Jury (Neon XHigh + Claude Sonnet/Opus + GPT-OSS 120B)
+- Optional auto-export of verified Research Dossiers to Obsidian (/sdcard/Documents/OmegaVault)
 """
 from __future__ import annotations
 
@@ -26,12 +26,14 @@ from typing import Any
 
 from . import OmegaPaths, get_paths
 from .fabric import IntelligenceFabric
+from .jury import AsymmetricJury
 from .memory import KnowledgeFabric, connect_vault
+from .obsidian import DEFAULT_VAULT_DIR, ObsidianSync
 
 MODE_CAPS = {
-    "FAST": {"max_urls": 4, "timeout_s": 25, "use_challenge": False, "use_swarm": False},
-    "STANDARD": {"max_urls": 8, "timeout_s": 45, "use_challenge": True, "use_swarm": False},
-    "DEEP": {"max_urls": 12, "timeout_s": 75, "use_challenge": True, "use_swarm": True},
+    "FAST": {"max_urls": 6, "timeout_s": 25, "deep_indexes": False, "use_jury": False},
+    "STANDARD": {"max_urls": 12, "timeout_s": 45, "deep_indexes": True, "use_jury": False},
+    "DEEP": {"max_urls": 24, "timeout_s": 90, "deep_indexes": True, "use_jury": True},
 }
 
 DATE_SENSITIVE_RX = re.compile(
@@ -39,35 +41,68 @@ DATE_SENSITIVE_RX = re.compile(
     re.IGNORECASE,
 )
 
-UA = "OmegaApexResearch/6.0 (Android; $0.00 pure-stdlib)"
+# Idiomatic Chinese expansion map across ALL domains (AI, coding, finance, hardware, fitness, gaming)
+ZH_TERM_MAP: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b(?:agent|harness|memory|llm|ai|model|claude|gemini|openai|rag)\b", re.I), "大模型 智能体 架构 实测 优化"),
+    (re.compile(r"\b(?:trading|quant|polymarket|kelly|market|crypto|alpha|arbitrage)\b", re.I), "量化 交易 策略 预测市场 实战"),
+    (re.compile(r"\b(?:android|hyperos|miui|xiaomi|poco|vermeer|kernel|touch|latency|fps)\b", re.I), "澎湃OS 调度 触控 延迟 优化 酷安"),
+    (re.compile(r"\b(?:armwrestling|gym|hypertrophy|strength|protein|fat\s*loss|workout)\b", re.I), "腕力 力量训练 增肌 减脂 动作 生物力学"),
+    (re.compile(r"\b(?:obsidian|knowledge\s*graph|notes|workflow|productivity)\b", re.I), "Obsidian 知识图谱 双链 工作流 配置"),
+    (re.compile(r"\b(?:security|audit|injection|sandbox|exploit|vulnerability)\b", re.I), "安全 审计 提示注入 沙箱 防护"),
+    (re.compile(r"\b(?:python|rust|sqlite|database|performance|benchmark|cache)\b", re.I), "性能优化 源码 基准测试 踩坑"),
+]
+
+UA = "OmegaApexResearch/6.1 (Android; $0.00 pure-stdlib)"
 
 
 def is_date_sensitive(question: str) -> bool:
     return bool(DATE_SENSITIVE_RX.search(question))
 
 
-def _http_get_json(url: str, timeout: int = 8) -> dict[str, Any] | None:
+def expand_chinese_query(question: str) -> str:
+    """Build an idiomatic Chinese companion query for CN GitHub / V2EX / Gitee / CN search."""
+    if re.search(r"[\u4e00-\u9fff]", question):
+        return question
+    zh_bits: list[str] = []
+    for rx, zh in ZH_TERM_MAP:
+        if rx.search(question):
+            zh_bits.append(zh)
+    # Keep salient English technical identifiers (model names, package names, numbers)
+    tech_tokens = re.findall(r"\b[A-Za-z0-9][A-Za-z0-9._-]{2,}\b", question)[:4]
+    if not zh_bits:
+        zh_bits.append("原理 实战 踩坑 评测")
+    return " ".join(tech_tokens + zh_bits[:2])
+
+
+def _http_get_json(url: str, timeout: int = 8) -> Any:
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read(131072).decode("utf-8", errors="replace"))
+            return json.loads(r.read(196608).decode("utf-8", errors="replace"))
     except Exception:
         return None
 
 
-def _discover_hn(query: str, date_sensitive: bool, limit: int = 4) -> list[dict[str, str]]:
+# --- Orthogonal High-Signal Index Connectors ($0.00) ---
+
+def _discover_hn_stories(query: str, date_sensitive: bool, limit: int = 5) -> list[dict[str, str]]:
+    """High-signal HN stories only (points >= 5; eliminates pts=0 noise)."""
     ep = "search_by_date" if date_sensitive else "search"
-    url = f"https://hn.algolia.com/api/v1/{ep}?query={urllib.parse.quote(query)}&tags=story&hitsPerPage={limit}"
+    url = (
+        f"https://hn.algolia.com/api/v1/{ep}?query={urllib.parse.quote(query)}"
+        f"&tags=story&numericFilters=points%3E%3D5&hitsPerPage={limit}"
+    )
     data = _http_get_json(url, timeout=8)
-    if not data:
+    if not isinstance(data, dict):
         return []
     out = []
     for h in data.get("hits", []):
-        u = (h.get("url") or "").strip()
+        u = (h.get("url") or f"https://news.ycombinator.com/item?id={h.get('objectID','')}").strip()
         if u.startswith(("http://", "https://")):
             out.append(
                 {
-                    "source": "hn_algolia",
+                    "lane": "practitioner",
+                    "source": f"hn_story(pts={h.get('points', 0)})",
                     "url": u,
                     "title": str(h.get("title") or "")[:180],
                     "published_at": str(h.get("created_at") or "")[:20],
@@ -76,37 +111,208 @@ def _discover_hn(query: str, date_sensitive: bool, limit: int = 4) -> list[dict[
     return out
 
 
-def _discover_ddg(query: str, limit: int = 3) -> list[dict[str, str]]:
+def _discover_hn_comments(query: str, limit: int = 5) -> list[dict[str, str]]:
+    """HN practitioner comments — where senior engineers expose failure modes and real trade-offs."""
+    url = f"https://hn.algolia.com/api/v1/search?query={urllib.parse.quote(query)}&tags=comment&hitsPerPage={limit}"
+    data = _http_get_json(url, timeout=8)
+    if not isinstance(data, dict):
+        return []
+    out = []
+    for h in data.get("hits", []):
+        oid = h.get("objectID") or ""
+        txt = re.sub(r"<[^>]+>", " ", str(h.get("comment_text") or ""))
+        txt = re.sub(r"\s+", " ", txt).strip()
+        if oid and len(txt) > 80:
+            out.append(
+                {
+                    "lane": "hostile",
+                    "source": "hn_comment",
+                    "url": f"https://news.ycombinator.com/item?id={oid}",
+                    "title": str(h.get("story_title") or "HN Comment")[:160],
+                    "snippet": txt[:600],
+                    "published_at": str(h.get("created_at") or "")[:20],
+                }
+            )
+    return out
+
+
+def _discover_github_issues(query: str, limit: int = 5) -> list[dict[str, str]]:
+    """GitHub Issues/PRs sorted by reactions/comments via authenticated `gh api` ($0.00)."""
+    q = urllib.parse.quote(f"{query} is:issue")
+    try:
+        r = subprocess.run(
+            ["gh", "api", f"search/issues?q={q}&sort=comments&order=desc&per_page={limit}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if r.returncode != 0:
+            return []
+        data = json.loads(r.stdout)
+    except Exception:
+        return []
+    out = []
+    for it in data.get("items", []):
+        u = str(it.get("html_url") or "")
+        if u:
+            out.append(
+                {
+                    "lane": "hostile",
+                    "source": f"github_issue(comments={it.get('comments', 0)})",
+                    "url": u,
+                    "title": str(it.get("title") or "")[:180],
+                    "snippet": str(it.get("body") or "")[:500],
+                    "published_at": str(it.get("updated_at") or "")[:20],
+                }
+            )
+    return out
+
+
+def _discover_github_repos(query: str, *, chinese: bool = False, limit: int = 5) -> list[dict[str, str]]:
+    """GitHub Repos (English or Chinese deep ecosystem) via authenticated `gh api` ($0.00)."""
+    q_text = expand_chinese_query(query) if chinese else query
+    q = urllib.parse.quote(q_text)
+    try:
+        r = subprocess.run(
+            ["gh", "api", f"search/repositories?q={q}&sort=stars&order=desc&per_page={limit}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if r.returncode != 0:
+            return []
+        data = json.loads(r.stdout)
+    except Exception:
+        return []
+    out = []
+    for repo in data.get("items", []):
+        u = str(repo.get("html_url") or "")
+        if u:
+            out.append(
+                {
+                    "lane": "chinese" if chinese else "primary",
+                    "source": f"{'cn_' if chinese else ''}github_repo(stars={repo.get('stargazers_count', 0)})",
+                    "url": u,
+                    "title": f"{repo.get('full_name','')}: {str(repo.get('description') or '')[:140]}",
+                    "snippet": str(repo.get("description") or "")[:400],
+                    "published_at": str(repo.get("pushed_at") or "")[:20],
+                }
+            )
+    return out
+
+
+def _discover_gitee_cn(query: str, limit: int = 4) -> list[dict[str, str]]:
+    """Chinese Gitee public repository search API ($0.00)."""
+    zh_q = urllib.parse.quote(expand_chinese_query(query))
+    data = _http_get_json(f"https://gitee.com/api/v5/search/repositories?q={zh_q}&sort=stars_count&order=desc&per_page={limit}", timeout=8)
+    if not isinstance(data, list):
+        return []
+    out = []
+    for repo in data[:limit]:
+        u = str(repo.get("html_url") or "")
+        if u.startswith("http"):
+            out.append(
+                {
+                    "lane": "chinese",
+                    "source": f"gitee_cn(stars={repo.get('stargazers_count', 0)})",
+                    "url": u,
+                    "title": f"{repo.get('full_name','')}: {str(repo.get('description') or '')[:140]}",
+                    "snippet": str(repo.get("description") or "")[:400],
+                }
+            )
+    return out
+
+
+def _discover_openalex(query: str, limit: int = 4) -> list[dict[str, str]]:
+    """OpenAlex (250M+ scholarly papers, citation-ranked, free JSON API)."""
+    url = f"https://api.openalex.org/works?search={urllib.parse.quote(query)}&sort=cited_by_count:desc&per-page={limit}"
+    data = _http_get_json(url, timeout=8)
+    if not isinstance(data, dict):
+        return []
+    out = []
+    for w in data.get("results", []):
+        loc = (w.get("primary_location") or {}).get("landing_page_url") or w.get("doi") or w.get("id") or ""
+        if str(loc).startswith("http"):
+            out.append(
+                {
+                    "lane": "academic",
+                    "source": f"openalex(cites={w.get('cited_by_count', 0)})",
+                    "url": str(loc),
+                    "title": str(w.get("title") or "")[:180],
+                    "published_at": str(w.get("publication_year") or ""),
+                }
+            )
+    return out
+
+
+def _discover_stackexchange(query: str, limit: int = 4) -> list[dict[str, str]]:
+    """StackExchange API (StackOverflow high-vote technical answers)."""
+    url = (
+        f"https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=votes"
+        f"&q={urllib.parse.quote(query)}&site=stackoverflow&pagesize={limit}"
+    )
+    data = _http_get_json(url, timeout=8)
+    if not isinstance(data, dict):
+        return []
+    out = []
+    for it in data.get("items", []):
+        u = str(it.get("link") or "")
+        if u.startswith("http"):
+            out.append(
+                {
+                    "lane": "practitioner",
+                    "source": f"stackoverflow(score={it.get('score', 0)})",
+                    "url": u,
+                    "title": str(it.get("title") or "")[:180],
+                }
+            )
+    return out
+
+
+def _discover_europe_pmc(query: str, limit: int = 3) -> list[dict[str, str]]:
+    """Europe PMC / PubMed free JSON API (biomedical, strength, nutrition, biomechanics)."""
+    url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/search?query={urllib.parse.quote(query)}&format=json&pageSize={limit}"
+    data = _http_get_json(url, timeout=8)
+    if not isinstance(data, dict):
+        return []
+    out = []
+    for r in (data.get("resultList") or {}).get("result", []):
+        pmid = r.get("pmid") or r.get("pmcid") or ""
+        u = f"https://europepmc.org/article/MED/{pmid}" if pmid else ""
+        if u:
+            out.append(
+                {
+                    "lane": "academic",
+                    "source": f"europe_pmc(cites={r.get('citedByCount', 0)})",
+                    "url": u,
+                    "title": str(r.get("title") or "")[:180],
+                    "published_at": str(r.get("pubYear") or ""),
+                }
+            )
+    return out
+
+
+def _discover_ddg(query: str, limit: int = 2) -> list[dict[str, str]]:
     url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}&format=json&no_html=1&skip_disambig=1"
     data = _http_get_json(url, timeout=8)
-    if not data:
+    if not isinstance(data, dict):
         return []
     out = []
     abs_url = str(data.get("AbstractURL") or "").strip()
     if abs_url.startswith(("http://", "https://")):
         out.append(
             {
+                "lane": "primary",
                 "source": "ddg_instant",
                 "url": abs_url,
                 "title": str(data.get("Heading") or query)[:180],
                 "snippet": str(data.get("AbstractText") or "")[:400],
             }
         )
-    for topic in data.get("RelatedTopics", []):
-        if len(out) >= limit:
-            break
-        if isinstance(topic, dict) and str(topic.get("FirstURL", "")).startswith(("http://", "https://")):
-            out.append(
-                {
-                    "source": "ddg_instant",
-                    "url": topic["FirstURL"],
-                    "title": str(topic.get("Text") or "")[:180],
-                }
-            )
     return out[:limit]
 
 
-def _discover_arxiv(query: str, limit: int = 3) -> list[dict[str, str]]:
+def _discover_arxiv(query: str, limit: int = 4) -> list[dict[str, str]]:
     url = (
         "https://export.arxiv.org/api/query?"
         f"search_query=all:{urllib.parse.quote(query)}&max_results={limit}&sortBy=submittedDate&sortOrder=descending"
@@ -121,29 +327,63 @@ def _discover_arxiv(query: str, limit: int = 3) -> list[dict[str, str]]:
         for entry in root.findall("a:entry", ns):
             eid = (entry.findtext("a:id", "", ns) or "").strip()
             title = re.sub(r"\s+", " ", (entry.findtext("a:title", "", ns) or "")).strip()
+            summary = re.sub(r"\s+", " ", (entry.findtext("a:summary", "", ns) or "")).strip()
             pub = (entry.findtext("a:published", "", ns) or "")[:20]
             if eid.startswith(("http://", "https://")):
-                out.append({"source": "arxiv", "url": eid, "title": title[:180], "published_at": pub})
+                out.append(
+                    {
+                        "lane": "academic",
+                        "source": "arxiv",
+                        "url": eid,
+                        "title": title[:180],
+                        "snippet": summary[:500],
+                        "published_at": pub,
+                    }
+                )
         return out
     except Exception:
         return []
 
 
-def live_discover_urls(query: str, *, date_sensitive: bool, max_urls: int = 4) -> list[dict[str, str]]:
-    """Run parallel $0.00 live API discovery (HN Algolia, DDG Instant, arXiv) with strict timeout."""
-    discovered: list[dict[str, str]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
-        futs = [
-            ex.submit(_discover_hn, query, date_sensitive, max_urls),
-            ex.submit(_discover_ddg, query, 2),
-            ex.submit(_discover_arxiv, query, 2),
+def live_discover_multi_index(
+    query: str,
+    *,
+    date_sensitive: bool,
+    deep_indexes: bool = False,
+) -> tuple[list[dict[str, str]], list[str]]:
+    """Run parallel high-signal multi-index discovery (EN + CN + GitHub + Hostile Failure Lane)."""
+    failure_q = f"{query} regression OR broken OR benchmark OR issue"
+    tasks: list[tuple[str, Any, tuple]] = [
+        ("hn_stories_pts5", _discover_hn_stories, (query, date_sensitive, 5)),
+        ("hn_comments", _discover_hn_comments, (failure_q, 4)),
+        ("github_repos_en", _discover_github_repos, (query,)),
+        ("github_repos_cn", lambda q: _discover_github_repos(q, chinese=True, limit=4), (query,)),
+        ("github_issues", _discover_github_issues, (query, 4)),
+        ("arxiv", _discover_arxiv, (query, 4)),
+        ("ddg_instant", _discover_ddg, (query, 2)),
+    ]
+    if deep_indexes:
+        tasks += [
+            ("gitee_cn", _discover_gitee_cn, (query, 4)),
+            ("openalex", _discover_openalex, (query, 4)),
+            ("stackoverflow", _discover_stackexchange, (query, 4)),
+            ("europe_pmc", _discover_europe_pmc, (query, 3)),
         ]
-        for f in futs:
+
+    discovered: list[dict[str, str]] = []
+    indexes_used: list[str] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(tasks))) as ex:
+        fut_map = {ex.submit(fn, *args): name for name, fn, args in tasks}
+        for fut in concurrent.futures.as_completed(fut_map, timeout=14):
+            name = fut_map[fut]
             try:
-                discovered.extend(f.result(timeout=10))
+                res = fut.result(timeout=1)
+                if res:
+                    indexes_used.append(name)
+                    discovered.extend(res)
             except Exception:
                 pass
-    return discovered
+    return discovered, sorted(indexes_used)
 
 
 class ResearchEngine:
@@ -154,7 +394,6 @@ class ResearchEngine:
         self.tools_dir = os.path.expanduser("~/tools")
 
     def _find_cached_evidence(self, locator: str, freshness_ttl_s: int) -> dict[str, Any] | None:
-        """Section 20 Anti-Loop Cache: reuse verified evidence if URL is fresh and unchanged."""
         conn = connect_vault(self.paths)
         try:
             row = conn.execute(
@@ -172,46 +411,6 @@ class ResearchEngine:
         finally:
             conn.close()
 
-    def _web_grounded_discovery(self, question: str, today: str, timeout_s: int = 30) -> dict[str, Any]:
-        """Run a live web-search-grounded model call via `agy` so answers NEVER rely on stale cutoff weights."""
-        prompt = (
-            f"Today's date is {today}. Use live web search (search_web) to answer this question with up-to-date primary sources. "
-            "Do NOT rely on stale training memory for current versions, dates, or releases. "
-            "Return concise bullets with exact inline URLs and publication dates, plus an UNVERIFIED line for anything unconfirmed.\n"
-            f"Question: {question}"
-        )
-        # Prefer fast qualified flash/sonnet model from live pool
-        return self.fabric.execute_with_fallback(
-            "fast live web grounded lookup",
-            prompt,
-            timeout_s=timeout_s,
-            max_attempts=2,
-        )
-
-    def _cross_family_challenge(
-        self,
-        question: str,
-        today: str,
-        evidence_snippets: list[str],
-        timeout_s: int = 35,
-    ) -> dict[str, Any]:
-        """Section 20 One-Pass Cross-Family Adversarial Challenge grounded strictly in retrieved evidence."""
-        joined = "\n\n".join(evidence_snippets)[:8000]
-        prompt = (
-            f"Today's date is {today}. Act as an independent adversarial reviewer.\n"
-            f"Question: {question}\n\n"
-            f"GROUNDED LIVE EVIDENCE (do NOT invent facts outside this evidence; flag stale or missing info explicitly):\n{joined}\n\n"
-            "Write concise, mobile-safe markdown with these EXACT headings:\n"
-            "## Evidence\n## Contrarian / Non-Consensus Point\n## Falsification Check\n## UNVERIFIED\n"
-        )
-        # Route through security_audit (prefers claude-opus/sonnet/gpt-oss cross-family pool)
-        return self.fabric.execute_with_fallback(
-            "adversarial security audit review",
-            prompt,
-            timeout_s=timeout_s,
-            max_attempts=2,
-        )
-
     def run(
         self,
         question: str,
@@ -225,6 +424,8 @@ class ResearchEngine:
         web_ground: bool = False,
         challenge: bool | None = None,
         offline: bool = False,
+        export_obsidian: bool = False,
+        vault_dir: str = DEFAULT_VAULT_DIR,
     ) -> dict[str, Any]:
         m = mode.upper().strip()
         if m not in MODE_CAPS:
@@ -235,14 +436,15 @@ class ResearchEngine:
         today = time.strftime("%Y-%m-%d")
         date_sens = is_date_sensitive(question)
         freshness_ttl_s = 3600 if date_sens else 86400
+        zh_query = expand_chinese_query(question)
 
         evidence_ids: list[str] = []
-        evidence_snippets: list[str] = []
+        positive_snippets: list[str] = []
+        hostile_snippets: list[str] = []
         errors: list[str] = []
         cache_hits = 0
 
         # Step 2: Prior knowledge & memory retrieval BEFORE paying rediscovery cost
-        # Build BM25-friendly OR query from salient keywords so natural-language questions match
         stop = {"the", "and", "for", "with", "what", "how", "does", "from", "that", "this", "are", "was", "were", "into", "about"}
         kw = [w for w in re.findall(r"[A-Za-z0-9_]{3,}", question.lower()) if w not in stop]
         fts_q = " OR ".join(dict.fromkeys(kw[:6])) if kw else question
@@ -250,14 +452,14 @@ class ResearchEngine:
         if prior_mems:
             t_first = round((time.monotonic() - t0) * 1000.0, 1)
             for pm in prior_mems:
-                evidence_snippets.append(f"[prior_memory:{pm['key']}|auth={pm['authority']}] {pm['text'][:300]}")
+                positive_snippets.append(f"[prior:{pm['key']}|auth={pm['authority']}] {pm['text'][:300]}")
 
         # Local FTS5 corpus query (<5ms, $0.00)
         deep_crawl = os.path.join(self.tools_dir, "deep_crawl.py")
         if corpus_query and os.path.exists(deep_crawl):
             try:
                 r = subprocess.run(
-                    ["python3", deep_crawl, "query", corpus_query, "--limit", "8"],
+                    ["python3", deep_crawl, "query", corpus_query, "--limit", "10"],
                     capture_output=True,
                     text=True,
                     timeout=10,
@@ -266,7 +468,7 @@ class ResearchEngine:
                     if t_first is None:
                         t_first = round((time.monotonic() - t0) * 1000.0, 1)
                     ev = self.kf.record_evidence(
-                        claim_text=f"Local corpus match for: {question[:140]}",
+                        claim_text=f"Local FTS5 corpus match for: {question[:140]}",
                         source_id="local_fts5_corpus",
                         locator=f"corpus://{corpus_query}",
                         content_sample=r.stdout[:2000],
@@ -278,45 +480,27 @@ class ResearchEngine:
                         verification_status="verified",
                     )
                     evidence_ids.append(ev["evidence_id"])
-                    evidence_snippets.append(f"[corpus:{corpus_query}] {r.stdout[:1200]}")
+                    positive_snippets.append(f"[corpus:{corpus_query}] {r.stdout[:1200]}")
             except Exception as e:
                 errors.append(f"corpus_query:{e}")
 
-        # Step 4: Parallel live discovery (API search + optional live search_web grounded model)
+        # Step 4: Multi-Index Parallel Discovery (EN + CN + GitHub Issues/Repos + Academic + HN Comments)
         discovered_meta: list[dict[str, str]] = []
+        indexes_hit: list[str] = []
         if not offline and live_search:
-            discovered_meta = live_discover_urls(question, date_sensitive=date_sens, max_urls=cfg["max_urls"])
+            discovered_meta, indexes_hit = live_discover_multi_index(
+                question, date_sensitive=date_sens, deep_indexes=cfg["deep_indexes"]
+            )
             if discovered_meta and t_first is None:
                 t_first = round((time.monotonic() - t0) * 1000.0, 1)
-
-        grounded_summary = ""
-        if not offline and web_ground:
-            wg = self._web_grounded_discovery(question, today, timeout_s=min(35, cfg["timeout_s"]))
-            if wg.get("ok") and wg.get("text"):
-                grounded_summary = wg["text"]
-                if t_first is None:
-                    t_first = round((time.monotonic() - t0) * 1000.0, 1)
-                ev = self.kf.record_evidence(
-                    claim_text=f"Live search_web grounded discovery ({today}): {question[:120]}",
-                    source_id=f"search_web:{wg['model_used']}",
-                    locator=f"search_web://{today}/{hashlib.sha256(question.encode()).hexdigest()[:10]}",
-                    content_sample=grounded_summary[:4000],
-                    mission_id=mission_id,
-                    source_type="secondary",
-                    published_at=today,
-                    retrieval_scope="snippet",
-                    support_type="supports",
-                    verification_method="live_search_web",
-                    verification_status="partial",
-                    limitations="Search-grounded synthesis; inspect primary URLs for full verification.",
-                )
-                evidence_ids.append(ev["evidence_id"])
-                evidence_snippets.append(f"[live_search_web:{wg['model_used']}] {grounded_summary[:2500]}")
-                # Extract any discovered URLs from the grounded response for primary full-text verification
-                for u in re.findall(r"https?://[^\s\)\]>\"']+", grounded_summary):
-                    discovered_meta.append({"source": "search_web", "url": u.rstrip(".,;:"), "title": ""})
-            else:
-                errors.append(f"web_ground_failed:{wg.get('error', 'unknown')}")
+            for d in discovered_meta:
+                snip = d.get("snippet") or d.get("title") or ""
+                if snip:
+                    line = f"[{d['source']}|{d['url']}] {d.get('title','')}: {snip[:350]}"
+                    if d.get("lane") == "hostile":
+                        hostile_snippets.append(line)
+                    else:
+                        positive_snippets.append(line)
 
         # Step 5: Deduplication across user URLs + discovered URLs
         raw_urls = list(urls or []) + [d["url"] for d in discovered_meta if d.get("url")]
@@ -335,7 +519,7 @@ class ResearchEngine:
             if len(dedup_urls) >= cfg["max_urls"]:
                 break
 
-        # Section 20 Anti-Loop: skip re-fetching URLs already verified within freshness TTL
+        # Section 20 Anti-Loop verification cache
         urls_to_fetch: list[str] = []
         for u in dedup_urls:
             cached = self._find_cached_evidence(u, freshness_ttl_s)
@@ -345,13 +529,13 @@ class ResearchEngine:
             else:
                 urls_to_fetch.append(u)
 
-        # Step 7: Selective full-text retrieval via ~/tools/web_gather.py
+        # Step 7: Selective full-text fetch via ~/tools/web_gather.py
         web_gather = os.path.join(self.tools_dir, "web_gather.py")
         fetched_ok = 0
         if not offline and urls_to_fetch and os.path.exists(web_gather):
             try:
                 r = subprocess.run(
-                    ["python3", web_gather, *urls_to_fetch, "--max-chars", "2500"],
+                    ["python3", web_gather, *urls_to_fetch[:10], "--max-chars", "2200"],
                     capture_output=True,
                     text=True,
                     timeout=cfg["timeout_s"],
@@ -379,54 +563,47 @@ class ResearchEngine:
                                 verification_status="verified",
                             )
                             evidence_ids.append(ev["evidence_id"])
-                            evidence_snippets.append(
-                                f"[primary:{pg['url']}|title={pg.get('title','')[:80]}] {pg['text'][:1200]}"
-                            )
+                            positive_snippets.append(f"[primary:{pg['url']}] {pg['text'][:1000]}")
                         elif pg.get("error"):
                             errors.append(f"fetch:{pg.get('url','')[:60]}:{pg['error']}")
-                else:
-                    errors.append(f"web_gather_rc={r.returncode}")
             except subprocess.TimeoutExpired:
                 errors.append(f"web_gather_timeout_{cfg['timeout_s']}s")
 
-        # Step 12: Optional one-pass cross-family adversarial challenge grounded ONLY in live evidence
-        do_challenge = cfg["use_challenge"] if challenge is None else bool(challenge)
-        challenge_report = ""
-        gate_passed: bool | None = None
-        if not offline and do_challenge and evidence_snippets:
-            ch = self._cross_family_challenge(question, today, evidence_snippets, timeout_s=min(40, cfg["timeout_s"]))
-            if ch.get("ok") and ch.get("text"):
-                challenge_report = ch["text"]
-                gate_py = os.path.join(self.tools_dir, "non_consensus_gate.py")
-                if os.path.exists(gate_py):
-                    tmp_md = os.path.join(self.paths.tmpdir, f"omega_gate_{int(time.time())}.md")
-                    try:
-                        with open(tmp_md, "w", encoding="utf-8") as f:
-                            f.write(challenge_report)
-                        gr = subprocess.run(["python3", gate_py, tmp_md], capture_output=True, text=True, timeout=10)
-                        gate_passed = gr.returncode == 0
-                    finally:
-                        if os.path.exists(tmp_md):
-                            os.remove(tmp_md)
-            else:
-                errors.append(f"challenge_failed:{ch.get('error', 'unknown')}")
+        # Step 12: Optional True 3-Family Asymmetric Jury (Neon XHigh + Claude + GPT-OSS)
+        do_jury = cfg["use_jury"] if challenge is None else bool(challenge)
+        jury_out: dict[str, Any] = {}
+        if not offline and do_jury and (positive_snippets or hostile_snippets):
+            jury = AsymmetricJury(self.paths, self.fabric)
+            jury_out = jury.deliberate(
+                question,
+                positive_evidence="\n".join(positive_snippets),
+                hostile_evidence="\n".join(hostile_snippets),
+                export_obsidian=export_obsidian,
+                vault_dir=vault_dir,
+            )
+        elif export_obsidian and discovered_meta:
+            obs = ObsidianSync(vault_dir=vault_dir, paths=self.paths)
+            body = "## Live Multi-Index Sources\n" + "\n".join(
+                f"- [{d.get('title') or d['url']}]({d['url']}) (`{d['source']}`)"
+                for d in discovered_meta[:15]
+            )
+            jury_out["dossier_path"] = obs.export_dossier(question[:80], body, tags=[m.lower(), "multi-index"])
 
-        # Step 13: Explicit stopping decision & honest readiness status (Section 21 & 22)
         conflicts = self.kf.detect_claim_conflicts(mission_id) if mission_id else []
         total_verified = fetched_ok + cache_hits
         if offline:
             stop_reason = "offline_mode_prior_and_local_only"
         elif total_verified >= cfg["max_urls"]:
             stop_reason = f"mode_cap_reached ({cfg['max_urls']} sources for {m})"
-        elif total_verified > 0 or grounded_summary:
-            stop_reason = "sufficient_live_evidence_within_mode_budget"
+        elif total_verified > 0 or discovered_meta:
+            stop_reason = f"sufficient_multi_index_evidence ({len(indexes_hit)} indexes)"
         else:
             stop_reason = "no_live_sources_retrieved"
 
-        if total_verified > 0 and not conflicts and (gate_passed is not False):
-            readiness = "VERIFIED" if (not date_sens or fetched_ok > 0 or cache_hits > 0) else "PARTIAL"
-        elif grounded_summary or prior_mems or evidence_ids:
-            readiness = "PARTIAL" if not conflicts else "PROVISIONAL"
+        if total_verified > 0 and not conflicts:
+            readiness = "VERIFIED"
+        elif discovered_meta or prior_mems or evidence_ids:
+            readiness = "PARTIAL"
         else:
             readiness = "UNVERIFIED"
 
@@ -435,8 +612,9 @@ class ResearchEngine:
             "mode": m,
             "date": today,
             "date_sensitive": date_sens,
-            "freshness_ttl_s": freshness_ttl_s,
-            "question": question,
+            "chinese_query": zh_query,
+            "indexes_hit": indexes_hit,
+            "indexes_count": len(indexes_hit),
             "prior_memory_hits": len(prior_mems),
             "live_discovered_urls": len(discovered_meta),
             "urls_deduped": len(dedup_urls),
@@ -447,9 +625,7 @@ class ResearchEngine:
             "conflicts": conflicts,
             "readiness_status": readiness,
             "stop_reason": stop_reason,
-            "non_consensus_gate_passed": gate_passed,
-            "grounded_summary": grounded_summary[:1200] if grounded_summary else "",
-            "challenge_report": challenge_report[:2000] if challenge_report else "",
+            "jury": jury_out,
             "time_to_first_ms": t_first if t_first is not None else total_ms,
             "total_ms": total_ms,
             "errors": errors,

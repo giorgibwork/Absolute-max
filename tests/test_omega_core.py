@@ -174,6 +174,59 @@ class OmegaCoreTests(unittest.TestCase):
         self.assertIn("injectSteps", out1)
         self.assertEqual(out2, {})
 
+    def test_chinese_expansion_jury_and_obsidian_two_way_sync(self):
+        from omega_core.jury import AsymmetricJury
+        from omega_core.obsidian import ObsidianSync
+        from omega_core.research import expand_chinese_query
+
+        zh = expand_chinese_query("Polymarket Kelly sizing strategy")
+        self.assertRegex(zh, r"[\u4e00-\u9fff]")
+
+        # 3-family asymmetric jury (offline stubbed across 3 families)
+        def fake_inv(model_id: str, prompt: str, timeout_s: int):
+            return {
+                "ok": True,
+                "rc": 0,
+                "latency_ms": 10.0,
+                "text": (
+                    "NEXT: Run verified test.\n"
+                    "## Evidence\n- [Source](https://example.invalid/spec) measured 10ms.\n"
+                    "## Contrarian / Non-Consensus Point\n- Mainstream skips failure logs.\n"
+                    "## Falsification Check\n- Fails if latency > 50ms.\n"
+                    "## UNVERIFIED\n- None\n"
+                ),
+                "error": "",
+            }
+
+        fab = IntelligenceFabric(self.paths, invoker=fake_inv)
+        jury = AsymmetricJury(self.paths, fab)
+        jres = jury.deliberate(
+            "Test jury question",
+            positive_evidence="Primary source https://example.invalid/spec",
+            hostile_evidence="Issue #1 failure log",
+        )
+        self.assertTrue(jres["ok"])
+        self.assertEqual(jres["builder_model"], "gemini-4-neon-xhigh")
+        self.assertEqual(jres["prosecutor_model"], "claude-sonnet-5-5-medium")
+        self.assertEqual(jres["judge_model"], "gpt-oss-120b-medium")
+
+        # Obsidian vault creation + 2-way inbox ingest + valid graph.json & canvas
+        vdir = os.path.join(self.tmpdir, "TestOmegaVault")
+        os.makedirs(os.path.join(vdir, "08-Inbox"), exist_ok=True)
+        with open(os.path.join(vdir, "08-Inbox", "my-idea.md"), "w", encoding="utf-8") as f:
+            f.write("# Idea\nTrack weekly armwrestling cable PRs automatically.\n")
+
+        obs = ObsidianSync(vault_dir=vdir, paths=self.paths)
+        sres = obs.sync_all(force_config=True, include_corpus_highlights=False)
+        self.assertEqual(sres["ingest"]["ingested_count"], 1)
+        self.assertGreaterEqual(sres["nodes_written"], 10)
+        with open(os.path.join(vdir, ".obsidian", "graph.json"), "r", encoding="utf-8") as f:
+            gcfg = json.load(f)
+        self.assertEqual(len(gcfg["colorGroups"]), 8)
+        with open(sres["canvas"], "r", encoding="utf-8") as f:
+            cv = json.load(f)
+        self.assertGreaterEqual(len(cv["nodes"]), 8)
+
     def test_full_10_mission_acceptance_suite(self):
         rep = run_suite()
         self.assertEqual(rep["passed"], 10, msg=json.dumps(rep, indent=2))
