@@ -168,6 +168,11 @@ def cmd_research(args) -> None:
             urls=args.url or [],
             mission_id=args.mission_id,
             corpus_query=args.corpus_query,
+            task_family=args.family,
+            live_search=not args.no_live_search,
+            web_ground=args.web_ground,
+            challenge=True if args.challenge else (False if args.no_challenge else None),
+            offline=args.offline,
         )
     )
 
@@ -338,12 +343,18 @@ def build_parser() -> argparse.ArgumentParser:
     pmod.set_defaults(func=cmd_models)
 
     # research
-    pr = sub.add_parser("research", help="Adaptive FAST/STANDARD/DEEP research")
+    pr = sub.add_parser("research", help="Adaptive FAST/STANDARD/DEEP research with live web grounding")
     pr.add_argument("question")
     pr.add_argument("--mode", default="FAST", choices=["FAST", "STANDARD", "DEEP"])
     pr.add_argument("--url", action="append")
     pr.add_argument("--mission-id", default="")
     pr.add_argument("--corpus-query", default="")
+    pr.add_argument("--family", default="general")
+    pr.add_argument("--web-ground", action="store_true", help="Run live search_web grounded discovery pass")
+    pr.add_argument("--no-live-search", action="store_true", help="Skip free live API URL discovery")
+    pr.add_argument("--challenge", action="store_true", help="Force one-pass cross-family adversarial challenge")
+    pr.add_argument("--no-challenge", action="store_true", help="Skip cross-family adversarial challenge")
+    pr.add_argument("--offline", action="store_true", help="Prior memory + local corpus only")
     pr.set_defaults(func=cmd_research)
 
     # suite

@@ -125,6 +125,36 @@ class OmegaCoreTests(unittest.TestCase):
         pools = {b["quota_pool"] for b in bases}
         self.assertEqual(pools, {"gemini_models", "claude_gpt", "gemini_argon"})
 
+    def test_research_part_v_cache_dedup_and_date_sensitivity(self):
+        from omega_core.research import ResearchEngine, is_date_sensitive
+
+        self.assertTrue(is_date_sensitive("What is the newest Claude model in 2026?"))
+        self.assertFalse(is_date_sensitive("How does SQLite WAL journaling work?"))
+
+        kf = KnowledgeFabric(self.paths)
+        kf.add_memory("research/prior1", "SQLite WAL allows concurrent readers and one writer", task_family="db")
+        kf.record_evidence(
+            "Verified WAL spec",
+            source_id="web_gather",
+            locator="https://sqlite.org/wal.html",
+            content_sample="WAL mode documentation",
+            verification_status="verified",
+        )
+        eng = ResearchEngine(self.paths)
+        rep = eng.run(
+            "SQLite WAL concurrency",
+            mode="FAST",
+            urls=["https://sqlite.org/wal.html", "https://sqlite.org/wal.html/"],
+            task_family="db",
+            live_search=False,
+            offline=True,
+        )
+        self.assertEqual(rep["prior_memory_hits"], 1)
+        self.assertEqual(rep["duplicates_dropped"], 1)
+        self.assertEqual(rep["verification_cache_hits"], 1)
+        self.assertEqual(rep["readiness_status"], "VERIFIED")
+        self.assertEqual(rep["stop_reason"], "offline_mode_prior_and_local_only")
+
     def test_full_10_mission_acceptance_suite(self):
         rep = run_suite()
         self.assertEqual(rep["passed"], 10, msg=json.dumps(rep, indent=2))
