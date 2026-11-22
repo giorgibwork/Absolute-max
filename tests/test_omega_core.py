@@ -155,6 +155,25 @@ class OmegaCoreTests(unittest.TestCase):
         self.assertEqual(rep["readiness_status"], "VERIFIED")
         self.assertEqual(rep["stop_reason"], "offline_mode_prior_and_local_only")
 
+    def test_natural_language_auto_router_and_dedup(self):
+        from omega_core.router import classify_user_intent, route_invocation
+
+        r_fast = classify_user_intent("check online what the newest Claude model is right now")
+        self.assertEqual([r["intent"] for r in r_fast], ["FAST_RESEARCH"])
+
+        r_deep = classify_user_intent("do deep research and maximize my battery life")
+        self.assertEqual([r["intent"] for r in r_deep], ["DEEP_RESEARCH"])
+
+        r_stat = classify_user_intent("how are our tools looking?")
+        self.assertEqual([r["intent"] for r in r_stat], ["STATUS"])
+
+        # Same message twice in one turn must inject once, then dedup to {}
+        p = {"conversationId": "c1", "lastUserInput": "do deep research on Android 16"}
+        out1 = route_invocation(p, paths=self.paths)
+        out2 = route_invocation(p, paths=self.paths)
+        self.assertIn("injectSteps", out1)
+        self.assertEqual(out2, {})
+
     def test_full_10_mission_acceptance_suite(self):
         rep = run_suite()
         self.assertEqual(rep["passed"], 10, msg=json.dumps(rep, indent=2))
