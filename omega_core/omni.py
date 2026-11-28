@@ -30,9 +30,22 @@ from typing import Any
 
 warnings.filterwarnings("ignore", message=".*SOCKS support in urllib3.*")
 
-from . import OmegaPaths, ensure_dirs, get_paths, safe_fts_query, tokenize_multilingual, tune_sqlite
+from . import (
+    SCHEMA_BIT_CORPUS,
+    OmegaPaths,
+    ensure_dirs,
+    get_paths,
+    mark_schema_bit,
+    safe_fts_query,
+    schema_has_bit,
+    tokenize_multilingual,
+    tune_sqlite,
+)
 from .research import (
     _discover_arxiv,
+    _discover_europe_pmc,
+    _discover_geeknews_kr,
+    _discover_gitee_cn,
     _discover_github_issues,
     _discover_github_repos,
     _discover_habr_ru,
@@ -44,6 +57,7 @@ from .research import (
     _discover_stackexchange,
     expand_chinese_query,
     expand_japanese_query,
+    expand_korean_query,
     expand_russian_query,
     extract_anchor_terms,
 )
@@ -389,10 +403,13 @@ def discover_ddgs(query: str, max_results: int = 25) -> list[dict[str, str]]:
     return out[:max_results]
 
 
-def _corpus_conn(db_path: str) -> sqlite3.Connection:
+def _corpus_conn(db_path: str, *, read_only: bool = False) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=10.0)
-    tune_sqlite(conn)
+    if schema_has_bit(conn, SCHEMA_BIT_CORPUS):
+        tune_sqlite(conn, read_only=read_only)
+        return conn
+    tune_sqlite(conn, read_only=False)
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS docs (
@@ -427,6 +444,7 @@ def _corpus_conn(db_path: str) -> sqlite3.Connection:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(docs)").fetchall()}
     if "lane" not in cols:
         conn.execute("ALTER TABLE docs ADD COLUMN lane TEXT NOT NULL DEFAULT 'general'")
+    mark_schema_bit(conn, SCHEMA_BIT_CORPUS)
     conn.commit()
     return conn
 
@@ -435,26 +453,31 @@ TIER1_DOMAINS = (
     "arxiv.org", "github.com", "aclanthology.org", "openreview.net", "neurips.cc",
     "icml.cc", "iclr.cc", "sqlite.org", "docs.python.org", "developer.android.com",
     "antigravity.google", "aistudio.google.com", "research.google", "blog.google",
-    "microsoft.com/en-us/research", "proceedings.mlr.press",
+    "proceedings.mlr.press", "europepmc.org", "pubmed.ncbi.nlm.nih.gov", "gov.uk",
 )
 TIER2_DOMAINS = (
     "news.ycombinator.com", "lobste.rs", "news.smol.ai", "simonwillison.net",
     "openalex.org", "huggingface.co", "qiita.com", "habr.com", "ietf.org", "rfc-editor.org",
+    "news.hada.io", "gitee.com",
 )
 LOW_SIGNAL_DOMAINS = ("medium.com", "dev.to", "geeksforgeeks.org", "w3schools.com", "quora.com")
 
 
+def _host_matches(host: str, domain: str) -> bool:
+    return host == domain or host.endswith("." + domain)
+
+
 def score_source_authority(url: str, source: str = "") -> float:
-    """Doctrine Part V §19 deterministic source quality hierarchy (1.0=primary paper/code -> 0.35=low-signal)."""
-    u = (url or "").lower()
+    """Doctrine Part V §19 strict-host source quality hierarchy (immune to URL query-param spoofing)."""
+    host = _url_domain(url)
     s = (source or "").lower()
-    if any(d in u for d in TIER1_DOMAINS) or s.startswith(("arxiv", "github_repo", "github_issue")):
+    if (host and any(_host_matches(host, d) for d in TIER1_DOMAINS)) or s.startswith(("arxiv", "github_repo", "github_issue", "europe_pmc")):
         return 1.0
-    if any(d in u for d in TIER2_DOMAINS) or s.startswith(("hn_", "openalex", "lobsters", "smol_ai", "hf_daily", "qiita", "habr")):
+    if (host and any(_host_matches(host, d) for d in TIER2_DOMAINS)) or s.startswith(("hn_", "openalex", "lobsters", "smol_ai", "hf_daily", "qiita", "habr", "geeknews", "gitee")):
         return 0.88
-    if "wikipedia.org" in u or "stackoverflow.com" in u or s.startswith("wikipedia"):
+    if (host and (_host_matches(host, "wikipedia.org") or _host_matches(host, "stackoverflow.com"))) or s.startswith("wikipedia"):
         return 0.70
-    if any(d in u for d in LOW_SIGNAL_DOMAINS):
+    if host and any(_host_matches(host, d) for d in LOW_SIGNAL_DOMAINS):
         return 0.35
     return 0.60
 
@@ -542,10 +565,8 @@ def _bm25_top_hits(conn: sqlite3.Connection, anchor: str, top_k: int) -> list[tu
                     raw_hits.append(((0.85 / (10.0 + rank)) * auth, r))
 
     if not raw_hits:
-        return conn.execute(
-            "SELECT url, source, title, published, substr(text, 1, 180), lane FROM docs ORDER BY fetched_at DESC LIMIT ?",
-            (top_k,),
-        ).fetchall()
+        # NEVER poison novel domain queries with unrelated recent AI docs! Return empty so caller knows corpus is cold.
+        return []
 
     raw_hits.sort(key=lambda x: x[0], reverse=True)
 
@@ -601,7 +622,7 @@ def query_local_corpus(topic: str, *, db_path: str | None = None, top_k: int = 8
     if not os.path.isfile(db):
         return {"topic": topic, "db_path": db, "total_docs_in_db": 0, "elapsed_ms": 0.0, "top_hits": []}
     anchor = extract_anchor_terms(topic, max_terms=5)
-    conn = _corpus_conn(db)
+    conn = _corpus_conn(db, read_only=True)
     try:
         total = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
         rows = _bm25_top_hits(conn, anchor, top_k)
@@ -695,14 +716,15 @@ def bulk_crawl(
     """Pull up to 500+ public docs into local SQLite FTS5 at $0.00 and 0 LLM tokens, then return compact top BM25 hits."""
     t0 = time.monotonic()
     db = db_path or os.path.expanduser("~/.antigem/memory/omega_corpus.db")
-    anchor = extract_anchor_terms(topic, max_terms=3)
+    anchor = extract_anchor_terms(topic, max_terms=4)
     anchor_2 = extract_anchor_terms(topic, max_terms=2)
     zh_q = expand_chinese_query(topic)
     ja_q = expand_japanese_query(topic)
     ru_q = expand_russian_query(topic)
+    ko_q = expand_korean_query(topic)
     hostile_q = f"{anchor_2} broken OR regression OR myth OR overrated"
 
-    # 1. High-yield parallel multilingual + hostile non-consensus seed discovery
+    # 1. High-yield parallel multilingual (EN/ZH/JA/RU/KO) + hostile + science/biomechanics seed discovery
     rows: list[dict[str, str]] = []
     seed_urls: list[str] = []
     engines_ok: list[str] = []
@@ -712,48 +734,62 @@ def bulk_crawl(
         ("ddg_en", "general", discover_ddgs, (topic, 35)),
         ("ddg_hostile", "hostile", discover_ddgs, (hostile_q, 25)),
         ("ddg_zh", "multilingual", discover_ddgs, (zh_q, 25)),
-        ("arxiv", "academic", _discover_arxiv, (anchor, min(160, max(40, target_pages // 3)))),
+        ("ddg_ko", "multilingual", discover_ddgs, (ko_q, 15)),
+        ("arxiv", "academic", _discover_arxiv, (anchor, min(140, max(35, target_pages // 4)))),
         ("openalex", "academic", _discover_openalex, (anchor, min(60, max(25, target_pages // 6)))),
-        ("hn_stories", "general", _discover_hn_stories, (anchor_2, False, 60)),
-        ("hn_hostile", "hostile", lambda q, n: _discover_hn_comments(q, limit=n, hostile=True), (anchor_2, 50)),
-        ("github_en", "primary", lambda q, n: _discover_github_repos(q, chinese=False, limit=n), (anchor_2, 40)),
-        ("github_cn", "multilingual", lambda q, n: _discover_github_repos(q, chinese=True, limit=n), (topic, 30)),
-        ("github_issues", "hostile", _discover_github_issues, (anchor_2, 35)),
+        ("europe_pmc", "academic", _discover_europe_pmc, (anchor, 20)),
+        ("hn_stories", "general", _discover_hn_stories, (anchor_2, False, 50)),
+        ("hn_hostile", "hostile", lambda q, n: _discover_hn_comments(q, limit=n, hostile=True), (anchor_2, 45)),
+        ("github_en", "primary", lambda q, n: _discover_github_repos(q, chinese=False, limit=n), (anchor_2, 35)),
+        ("github_cn", "multilingual", lambda q, n: _discover_github_repos(q, chinese=True, limit=n), (topic, 25)),
+        ("gitee_cn", "multilingual", _discover_gitee_cn, (topic, 15)),
+        ("github_issues", "hostile", _discover_github_issues, (anchor_2, 30)),
         ("qiita_jp", "multilingual", _discover_qiita_jp, (topic, 15)),
-        ("habr_ru", "multilingual", _discover_habr_ru, (topic, 10)),
+        ("habr_ru", "multilingual", _discover_habr_ru, (topic, 12)),
+        ("geeknews_kr", "multilingual", _discover_geeknews_kr, (topic, 10)),
         ("lobsters", "hostile", _discover_lobsters, (topic, 15)),
-        ("stackoverflow", "general", _discover_stackexchange, (anchor, 25)),
+        ("stackoverflow", "general", _discover_stackexchange, (anchor, 20)),
     ]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as ex:
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=12)
+    try:
         fut_map = {ex.submit(fn, *args): (ename, dlane) for ename, dlane, fn, args in seed_jobs}
-        for f in concurrent.futures.as_completed(fut_map, timeout=22):
-            ename, dlane = fut_map[f]
-            try:
-                items = f.result(timeout=2)
-                if items:
-                    engines_ok.append(ename)
-                else:
+        try:
+            for f in concurrent.futures.as_completed(fut_map, timeout=22):
+                ename, dlane = fut_map[f]
+                try:
+                    items = f.result(timeout=2)
+                    if items:
+                        engines_ok.append(ename)
+                    else:
+                        engines_empty.append(ename)
+                    for it in items:
+                        u = it.get("url", "").strip()
+                        if not u:
+                            continue
+                        seed_urls.append(u)
+                        txt = (it.get("snippet") or it.get("title") or "").strip()
+                        if len(txt) >= 30:
+                            rows.append(
+                                {
+                                    "url": u,
+                                    "source": it.get("source") or ename,
+                                    "lane": it.get("lane") or dlane,
+                                    "title": it.get("title", u)[:180],
+                                    "published": it.get("published_at", ""),
+                                    "text": txt[:10000],
+                                }
+                            )
+                except Exception as e:
                     engines_empty.append(ename)
-                for it in items:
-                    u = it.get("url", "").strip()
-                    if not u:
-                        continue
-                    seed_urls.append(u)
-                    txt = (it.get("snippet") or it.get("title") or "").strip()
-                    if len(txt) >= 30:
-                        rows.append(
-                            {
-                                "url": u,
-                                "source": it.get("source") or ename,
-                                "lane": it.get("lane") or dlane,
-                                "title": it.get("title", u)[:180],
-                                "published": it.get("published_at", ""),
-                                "text": txt[:10000],
-                            }
-                        )
-            except Exception as e:
-                engines_empty.append(ename)
-                engine_errors[ename] = f"{type(e).__name__}: {str(e)[:80]}"
+                    engine_errors[ename] = f"{type(e).__name__}: {str(e)[:80]}"
+        except concurrent.futures.TimeoutError:
+            for f, (ename, _) in fut_map.items():
+                if not f.done():
+                    f.cancel()
+                    engines_empty.append(ename)
+                    engine_errors[ename] = "TimeoutError: exceeded 22s seed budget"
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
 
     # 2. Threaded full-page fetch with shared HTTP/2 connection pool + 1-hop BFS expansion
     seen_urls: set[str] = set()
@@ -862,6 +898,7 @@ def bulk_crawl(
         "chinese_query": zh_q,
         "japanese_query": ja_q,
         "russian_query": ru_q,
+        "korean_query": ko_q,
         "db_path": db,
         "engines_ok": sorted(engines_ok),
         "engines_empty": sorted(engines_empty),
@@ -1003,19 +1040,28 @@ def ingest_ai_pulse(
             ("geeknews_kr", lambda: _pull_rss(cli, "geeknews_kr", "https://news.hada.io/rss/news", "multilingual", 10)),
             ("v2ex_cn_hot", lambda: _pull_v2ex(cli)),
         ]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+        try:
             fmap = {ex.submit(fn): name for name, fn in jobs}
-            for f in concurrent.futures.as_completed(fmap, timeout=20):
-                name = fmap[f]
-                try:
-                    items = f.result(timeout=2)
-                    if items:
-                        sources_ok.append(name)
-                        rows.extend(items)
-                    else:
+            try:
+                for f in concurrent.futures.as_completed(fmap, timeout=20):
+                    name = fmap[f]
+                    try:
+                        items = f.result(timeout=2)
+                        if items:
+                            sources_ok.append(name)
+                            rows.extend(items)
+                        else:
+                            sources_failed.append(name)
+                    except Exception:
                         sources_failed.append(name)
-                except Exception:
-                    sources_failed.append(name)
+            except concurrent.futures.TimeoutError:
+                for f, name in fmap.items():
+                    if not f.done():
+                        f.cancel()
+                        sources_failed.append(name)
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
 
     unique_rows, collapsed = collapse_syndicated_mirrors(rows)
     now = int(time.time())

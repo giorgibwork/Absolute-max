@@ -23,12 +23,14 @@ import re
 import time
 from typing import Any
 
-from . import OmegaPaths, ensure_dirs, get_paths
+from . import OmegaPaths, atomic_json_write, ensure_dirs, get_paths, locked_file_op
 
 URL_RX = re.compile(r"https?://[^\s\"'<>)\]]{6,180}")
 HANDLE_RX = re.compile(r"(?<![A-Za-z0-9_])@[A-Za-z0-9_]{2,32}\b")
 PATH_RX = re.compile(r"(?:~/|/sdcard/|/data/data/ai\.antigem/files/home/|/data/user/0/ai\.antigem/files/home/)[A-Za-z0-9._/@~-]{3,160}")
 SECRET_HINT_RX = re.compile(r"(?:token|apikey|api_key|secret|password|private_key|seed|bearer)[=:\s]", re.IGNORECASE)
+WRITE_TOOL_NAMES = {"write_file", "edit_file", "write_to_file", "replace_file_content", "multi_replace_file_content"}
+SHELL_WRITE_RX = re.compile(r"(?:>>?\s*|tee\s+)(?:~/|/sdcard/|/data/(?:data|user/0)/ai\.antigem/files/home/)\S+")
 
 MAX_ITEMS = 12
 MAX_INJECT_CHARS = 1400
@@ -73,10 +75,7 @@ def load_anchor(conv_id: str, paths: OmegaPaths | None = None) -> dict[str, Any]
 def save_anchor(conv_id: str, data: dict[str, Any], paths: OmegaPaths | None = None) -> None:
     ap = anchor_path(conv_id, paths)
     data["updated_at"] = int(time.time())
-    tmp = ap + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, ap)
+    atomic_json_write(ap, data, indent=2)
 
 
 def _dedup_push(lst: list[str], item: str, limit: int = MAX_ITEMS) -> None:
@@ -98,47 +97,52 @@ def update_anchor_from_tool(
     err: str = "",
     paths: OmegaPaths | None = None,
 ) -> dict[str, Any]:
-    """Deterministic extractive update called from PostToolUse (<5ms, 0 LLM tokens)."""
-    anc = load_anchor(conv_id, paths)
-    blob = " ".join(
-        str(args.get(k) or "")
-        for k in ("Path", "TargetFile", "CommandLine", "command", "uri", "url", "text", "Prompt")
-    )
+    """Flock-safe deterministic extractive update called from PostToolUse (<3ms, 0 LLM tokens)."""
+    ap = anchor_path(conv_id, paths)
 
-    # Track written/edited files verbatim (never paraphrased; supports both CLI & App tool schemas)
-    fpath = str(args.get("Path") or args.get("TargetFile") or "").strip()
-    if fpath and tool in ("write_file", "edit_file", "write_to_file", "replace_file_content", "multi_replace_file_content"):
-        _dedup_push(anc["files_written"], fpath)
+    def _op() -> dict[str, Any]:
+        anc = load_anchor(conv_id, paths)
+        blob = " ".join(
+            str(args.get(k) or "")
+            for k in ("Path", "TargetFile", "AbsolutePath", "file_path", "CommandLine", "command", "cmd", "uri", "url", "Url", "text", "Prompt")
+        )
 
-    for m in PATH_RX.findall(blob):
-        m_clean = m.rstrip(".,;:")
-        if "/.gemini/antigravity-cli/mcp/" in m_clean or m_clean.endswith(".bak"):
-            continue
-        if tool in ("write_file", "edit_file") or any(ext in m_clean for ext in (".py", ".md", ".jpg", ".png", ".sh")):
-            _dedup_push(anc["files_written"], m_clean)
+        # Track ONLY genuinely written/edited files (never pollute files_written with read_file/view_file!)
+        fpath = str(args.get("Path") or args.get("TargetFile") or args.get("AbsolutePath") or args.get("file_path") or "").strip()
+        if fpath and tool in WRITE_TOOL_NAMES and "/.gemini/antigravity-cli/mcp/" not in fpath and not fpath.endswith(".bak"):
+            _dedup_push(anc["files_written"], fpath)
 
-    for u in URL_RX.findall(blob):
-        u_clean = u.rstrip(".,;:")
-        if "127.0.0.1" not in u_clean and "localhost" not in u_clean:
-            _dedup_push(anc["urls"], u_clean)
+        cmd = str(args.get("CommandLine") or args.get("command") or args.get("cmd") or "").strip()
+        if cmd and tool in ("run_command", "bash"):
+            for m in SHELL_WRITE_RX.findall(cmd):
+                for pth in PATH_RX.findall(m):
+                    p_clean = pth.rstrip(".,;:'\"")
+                    if "/.gemini/antigravity-cli/mcp/" not in p_clean and not p_clean.endswith(".bak"):
+                        _dedup_push(anc["files_written"], p_clean)
 
-    for h in HANDLE_RX.findall(blob):
-        if h.lower() not in ("@override", "@classmethod", "@staticmethod", "@property"):
-            _dedup_push(anc["handles"], h)
+        for u in URL_RX.findall(blob):
+            u_clean = u.rstrip(".,;:")
+            if "127.0.0.1" not in u_clean and "localhost" not in u_clean:
+                _dedup_push(anc["urls"], u_clean)
 
-    # Epistemic tracking: separate verified passes from failures (blocks arXiv:2607.13071 fabrication)
-    cmd = str(args.get("CommandLine") or args.get("command") or "").strip()
-    if cmd:
-        short_cmd = re.sub(r"\s+", " ", cmd)[:90]
-        if ok:
-            _dedup_push(anc["verified_pass"], short_cmd, limit=8)
-        else:
-            _dedup_push(anc["failed_cmds"], f"{short_cmd} -> {err[:60]}", limit=6)
-    elif not ok and err:
-        _dedup_push(anc["failed_cmds"], f"{tool} -> {err[:70]}", limit=6)
+        for h in HANDLE_RX.findall(blob):
+            if h.lower() not in ("@override", "@classmethod", "@staticmethod", "@property", "@dataclass"):
+                _dedup_push(anc["handles"], h)
 
-    save_anchor(conv_id, anc, paths)
-    return anc
+        # Epistemic tracking: separate verified passes from failures (blocks arXiv:2607.13071 fabrication)
+        if cmd:
+            short_cmd = re.sub(r"\s+", " ", cmd)[:90]
+            if ok:
+                _dedup_push(anc["verified_pass"], short_cmd, limit=8)
+            else:
+                _dedup_push(anc["failed_cmds"], f"{short_cmd} -> {err[:60]}", limit=6)
+        elif not ok and err:
+            _dedup_push(anc["failed_cmds"], f"{tool} -> {err[:70]}", limit=6)
+
+        save_anchor(conv_id, anc, paths)
+        return anc
+
+    return locked_file_op(ap + ".lock", _op)
 
 
 def pin_anchor_note(
@@ -238,9 +242,11 @@ def maybe_post_compact_message(
 
     latest_ckpt = _latest_checkpoint_step(tfile)
     prev_ckpt = int(anc.get("last_seen_checkpoint_step") or 0)
+    has_session_activity = bool(anc.get("files_written") or anc.get("verified_pass") or anc.get("urls") or anc.get("next_action"))
 
-    # First observation on an existing session: record current checkpoint without noisy injection
-    if prev_ckpt == 0 and latest_ckpt > 0:
+    # First observation on an already-compacted legacy session with NO recorded activity: record baseline silently.
+    # If this session already accumulated tool activity (first compaction mid-session!), DO restore immediately!
+    if prev_ckpt == 0 and latest_ckpt > 0 and not has_session_activity:
         anc["last_seen_checkpoint_step"] = latest_ckpt
         anc["transcript_mtime"] = mtime
         save_anchor(cid, anc, paths)

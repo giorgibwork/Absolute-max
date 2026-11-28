@@ -19,21 +19,39 @@ import sqlite3
 import time
 from typing import Any
 
-from . import OmegaPaths, ensure_dirs, get_paths, tune_sqlite
+from . import (
+    SCHEMA_BIT_DREAM,
+    OmegaPaths,
+    ensure_dirs,
+    get_paths,
+    mark_schema_bit,
+    schema_has_bit,
+    tune_sqlite,
+)
 from .codegraph import CodeGraph
 from .forge import SkillForge
 from .memory import KnowledgeFabric, connect_vault
 from .obsidian import DEFAULT_VAULT_DIR, ObsidianSync
 
-VOLATILE_RX = re.compile(r"(?:0x[0-9a-fA-F]+|\b\d{4,}\b|/[a-zA-Z0-9_./-]+/tmp/[a-zA-Z0-9_.-]+)")
+VOLATILE_RX = re.compile(
+    r"(?:0x[0-9a-fA-F]+|"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|"
+    r"(?:/[a-zA-Z0-9_./-]+)?/(?:tmp|vfs)/[a-zA-Z0-9_./-]+|"
+    r"\bline\s+\d+\b|"
+    r"\b\d{4,}\b)",
+    re.IGNORECASE,
+)
 
 
-def _connect_evo(paths: OmegaPaths) -> sqlite3.Connection:
+def _connect_evo(paths: OmegaPaths, *, read_only: bool = False) -> sqlite3.Connection:
     ensure_dirs(paths)
     conn = sqlite3.connect(paths.evolution_db, timeout=5.0)
     conn.row_factory = sqlite3.Row
-    tune_sqlite(conn)
-    conn.execute(
+    if schema_has_bit(conn, SCHEMA_BIT_DREAM):
+        tune_sqlite(conn, read_only=read_only)
+        return conn
+    tune_sqlite(conn, read_only=False)
+    conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS failure_signatures (
             sig_hash TEXT PRIMARY KEY,
@@ -45,8 +63,13 @@ def _connect_evo(paths: OmegaPaths) -> sqlite3.Connection:
             last_seen INTEGER NOT NULL,
             known_fix TEXT NOT NULL DEFAULT ''
         );
+        CREATE TABLE IF NOT EXISTS dream_seen_audit (
+            rec_hash TEXT PRIMARY KEY,
+            ts INTEGER NOT NULL
+        );
         """
     )
+    mark_schema_bit(conn, SCHEMA_BIT_DREAM)
     conn.commit()
     return conn
 
@@ -63,10 +86,12 @@ class DreamEngine:
         self.paths = paths or get_paths()
 
     def cluster_failures(self) -> dict[str, Any]:
-        """Extract deterministic failure signatures from audit_chain.jsonl."""
+        """Extract deterministic failure signatures from audit_chain.jsonl with rotation-safe incremental counting."""
         conn = _connect_evo(self.paths)
         seen_sigs: dict[str, dict[str, Any]] = {}
         try:
+            already = {r[0] for r in conn.execute("SELECT rec_hash FROM dream_seen_audit").fetchall()}
+            new_hashes: list[tuple[str, int]] = []
             if os.path.exists(self.paths.audit_log):
                 with open(self.paths.audit_log, "r", encoding="utf-8", errors="replace") as f:
                     for raw in f:
@@ -76,9 +101,14 @@ class DreamEngine:
                             continue
                         if rec.get("ok", True) or not rec.get("err"):
                             continue
+                        rhash = str(rec.get("hash") or hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24])
+                        if rhash in already:
+                            continue
+                        already.add(rhash)
+                        ts = int(rec.get("ts") or time.time())
+                        new_hashes.append((rhash, ts))
                         tool = str(rec.get("tool") or "unknown")
                         sig, norm = normalize_error(tool, str(rec.get("err") or ""))
-                        ts = int(rec.get("ts") or time.time())
                         entry = seen_sigs.setdefault(
                             sig,
                             {"tool": tool, "norm": norm, "cmd": str(rec.get("cmd_preview") or "")[:120], "count": 0, "first": ts, "last": ts},
@@ -94,10 +124,16 @@ class DreamEngine:
                         (sig_hash, tool, normalized_error, sample_cmd, occurrences, first_seen, last_seen)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(sig_hash) DO UPDATE SET
-                        occurrences=MAX(occurrences, excluded.occurrences),
+                        occurrences=occurrences + excluded.occurrences,
                         last_seen=MAX(last_seen, excluded.last_seen)
                     """,
                     (sig, d["tool"], d["norm"], d["cmd"], d["count"], d["first"], d["last"]),
+                )
+            if new_hashes:
+                conn.executemany("INSERT OR IGNORE INTO dream_seen_audit (rec_hash, ts) VALUES (?, ?)", new_hashes)
+                # Keep seen watermark bounded to latest 5000 error hashes
+                conn.execute(
+                    "DELETE FROM dream_seen_audit WHERE rec_hash NOT IN (SELECT rec_hash FROM dream_seen_audit ORDER BY ts DESC LIMIT 5000)"
                 )
             conn.commit()
             total = conn.execute("SELECT COUNT(*) FROM failure_signatures").fetchone()[0]
@@ -106,32 +142,41 @@ class DreamEngine:
         return {"signatures_parsed": len(seen_sigs), "total_signatures": total}
 
     def rebuild_memory_edges(self) -> dict[str, Any]:
-        """Auto-derive GraphRAG edges (supersedes + tag-overlap related_to) in omega_vault.db."""
-        kf = KnowledgeFabric(self.paths)
+        """Auto-derive GraphRAG edges (supersedes + tag-overlap related_to) in a single batched transaction."""
         conn = connect_vault(self.paths)
+        edges_to_upsert: list[tuple[str, str, str, float, int]] = []
+        now = int(time.time())
         try:
             rows = conn.execute("SELECT key, tags, status, superseded_by FROM memories").fetchall()
+            tag_map: dict[str, list[str]] = {}
+            for r in rows:
+                if r["superseded_by"]:
+                    edges_to_upsert.append((r["superseded_by"].strip(), "supersedes", r["key"].strip(), 1.0, now))
+                if r["status"] == "active":
+                    for t in [x.strip().lower() for x in r["tags"].split(",") if x.strip()]:
+                        tag_map.setdefault(t, []).append(r["key"])
+
+            for tag, keys in tag_map.items():
+                uniq = sorted(set(keys))
+                if 2 <= len(uniq) <= 8:
+                    for i in range(len(uniq)):
+                        for j in range(i + 1, len(uniq)):
+                            edges_to_upsert.append((uniq[i].strip(), "related_to", uniq[j].strip(), 0.6, now))
+
+            if edges_to_upsert:
+                conn.executemany(
+                    """
+                    INSERT INTO memory_edges (src_key, rel, dst_key, weight, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(src_key, rel, dst_key) DO UPDATE SET
+                        weight=excluded.weight, created_at=excluded.created_at
+                    """,
+                    edges_to_upsert,
+                )
+                conn.commit()
         finally:
             conn.close()
-
-        edges_created = 0
-        tag_map: dict[str, list[str]] = {}
-        for r in rows:
-            if r["superseded_by"]:
-                kf.link_memories(r["superseded_by"], "supersedes", r["key"], weight=1.0)
-                edges_created += 1
-            if r["status"] == "active":
-                for t in [x.strip().lower() for x in r["tags"].split(",") if x.strip()]:
-                    tag_map.setdefault(t, []).append(r["key"])
-
-        for tag, keys in tag_map.items():
-            uniq = sorted(set(keys))
-            if 2 <= len(uniq) <= 8:
-                for i in range(len(uniq)):
-                    for j in range(i + 1, len(uniq)):
-                        kf.link_memories(uniq[i], "related_to", uniq[j], weight=0.6)
-                        edges_created += 1
-        return {"edges_upserted": edges_created}
+        return {"edges_upserted": len(edges_to_upsert)}
 
     def prune_low_utility_memories(self, *, min_negatives: int = 3, max_utility: float = 0.25) -> dict[str, Any]:
         """Skill Deletion (arXiv:2611.28244 + Leto 2611.33005): revoke persistently harmful memories."""
@@ -178,6 +223,9 @@ class DreamEngine:
             adapters_dir = os.path.join(self.paths.repo_root, "adapters")
             if os.path.isdir(adapters_dir):
                 code_stats["adapters"] = cg.index_directory(adapters_dir)
+            tests_dir = os.path.join(self.paths.repo_root, "tests")
+            if os.path.isdir(tests_dir):
+                code_stats["tests"] = cg.index_directory(tests_dir)
             tools_dir = os.path.expanduser("~/tools")
             if os.path.isdir(tools_dir):
                 code_stats["tools"] = cg.index_directory(tools_dir)

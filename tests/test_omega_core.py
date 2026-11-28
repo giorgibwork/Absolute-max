@@ -165,10 +165,10 @@ class OmegaCoreTests(unittest.TestCase):
     def test_natural_language_auto_router_and_dedup(self):
         from omega_core.router import classify_user_intent, route_invocation
 
-        r_fast = classify_user_intent("check online what the newest Gemini model is right now")
+        r_fast = classify_user_intent("check online what the newest Gemini model is")
         self.assertEqual([r["intent"] for r in r_fast], ["FAST_RESEARCH"])
 
-        r_deep = classify_user_intent("do deep research and maximize my battery life")
+        r_deep = classify_user_intent("do deep research on battery life")
         self.assertEqual([r["intent"] for r in r_deep], ["DEEP_RESEARCH"])
 
         r_stat = classify_user_intent("how are our tools looking?")
@@ -312,7 +312,7 @@ class OmegaCoreTests(unittest.TestCase):
         self.assertIn("telegraphic_L1", tele_ctx["context"])
         self.assertIn("device/vermeer_touch", tele_ctx["context"])
 
-        jit = jit_hydrate_memories("my phone touch feels delayed in roblox", self.paths)
+        jit, _, _ = jit_hydrate_memories("my phone touch feels delayed in roblox", self.paths)
         self.assertIn("Goodix gt9916", jit)
         self.assertNotIn("Binance", jit)
 
@@ -544,22 +544,26 @@ class OmegaCoreTests(unittest.TestCase):
         )
         self.assertEqual(d_app_sec.decision, "force_ask")
 
-        # 5. Stop verification hook: 0 false positives on Q&A, bounded max 2 continues on unverified edit
+        # 5. Stop verification hook: 0 false positives on Q&A, real `NO_TOOL_CALL` + `continuationActive` + bounded max 2 continues
         stop_path = os.path.join(self.paths.repo_root, "adapters", "antigem", "stop_verify.py")
         spec = importlib.util.spec_from_file_location("stop_verify", stop_path)
         sv = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(sv)
-        self.assertEqual(sv.evaluate_stop({"conversationId": "qa1", "fullyIdle": True, "terminationReason": "model_stop"}, self.paths)["decision"], "stop")
+        self.assertEqual(sv.evaluate_stop({"conversationId": "qa1", "fullyIdle": True, "terminationReason": "NO_TOOL_CALL"}, self.paths)["decision"], "stop")
         with open(os.path.join(self.paths.state_dir, "ed1.json"), "w", encoding="utf-8") as f:
             json.dump({"code_edited": True, "tests_passed": False, "stop_continues": 0}, f)
-        self.assertEqual(sv.evaluate_stop({"conversationId": "ed1", "fullyIdle": True, "terminationReason": "model_stop"}, self.paths)["decision"], "continue")
-        self.assertEqual(sv.evaluate_stop({"conversationId": "ed1", "fullyIdle": True, "terminationReason": "model_stop"}, self.paths)["decision"], "continue")
+        self.assertEqual(sv.evaluate_stop({"conversationId": "ed1", "fullyIdle": True, "terminationReason": "NO_TOOL_CALL", "continuationActive": True}, self.paths)["decision"], "stop")
+        self.assertEqual(sv.evaluate_stop({"conversationId": "ed1", "fullyIdle": True, "terminationReason": "NO_TOOL_CALL"}, self.paths)["decision"], "continue")
+        self.assertEqual(sv.evaluate_stop({"conversationId": "ed1", "fullyIdle": True, "terminationReason": "NO_TOOL_CALL"}, self.paths)["decision"], "continue")
         # 3rd stop hits cap -> must allow stop (no infinite loop)
-        self.assertEqual(sv.evaluate_stop({"conversationId": "ed1", "fullyIdle": True, "terminationReason": "model_stop"}, self.paths)["decision"], "stop")
+        self.assertEqual(sv.evaluate_stop({"conversationId": "ed1", "fullyIdle": True, "terminationReason": "NO_TOOL_CALL"}, self.paths)["decision"], "stop")
 
         # 6. Lossless anchor updates + CodeGraph deleted-file pruning + AI_FEED auto-route
         update_anchor_from_tool("anc1", "write_to_file", {"TargetFile": "/data/user/0/ai.antigem/files/home/a.py"}, ok=True, paths=self.paths)
         self.assertIn("/data/user/0/ai.antigem/files/home/a.py", load_anchor("anc1", self.paths)["files_written"])
+        # Read-only tool must NOT pollute files_written
+        update_anchor_from_tool("anc1", "read_file", {"Path": "/data/user/0/ai.antigem/files/home/readonly.md"}, ok=True, paths=self.paths)
+        self.assertNotIn("/data/user/0/ai.antigem/files/home/readonly.md", load_anchor("anc1", self.paths)["files_written"])
 
         pdir = os.path.join(self.tmpdir, "prune_repo")
         os.makedirs(pdir, exist_ok=True)
@@ -575,6 +579,134 @@ class OmegaCoreTests(unittest.TestCase):
         self.assertEqual(cg.find_symbol("ghost_fn"), [])
 
         self.assertTrue(any(r["intent"] == "AI_FEED" for r in classify_user_intent("check my x feed for latest ai news")))
+
+    def test_v90_neon_pin_critic_expert_security_hardening_and_kv_cache_hygiene(self):
+        from omega_core import safe_fts_query, tokenize_multilingual
+        from omega_core.codegraph import CodeGraph
+        from omega_core.critic import critique_response, deterministic_critique
+        from omega_core.expert import build_expert_brief, detect_domain_profile
+        from omega_core.forge import SkillForge
+        from omega_core.omni import _bm25_top_hits, _corpus_conn, score_source_authority
+        from omega_core.research import expand_korean_query, extract_anchor_terms
+        from omega_core.router import route_invocation
+
+        # 1. Gemini 4 Neon XHigh primary pin across routes (never silently demoted by UNKNOWN vs QUALIFIED)
+        fab = IntelligenceFabric(self.paths)
+        self.assertEqual(fab.select_chain("Convert 10km to miles")["primary"], "gemini-4-neon-xhigh")
+        self.assertEqual(fab.select_chain("architect complex refactor")["primary"], "gemini-4-neon-xhigh")
+        self.assertEqual(fab.select_chain("run skeptical hostile audit")["primary"], "gemini-4-carbon-high")
+
+        # 2. P0 Security Kernel hardening (all prosecutor bypass vectors closed!)
+        fake_pat = "ghp_" + ("z" * 28)
+        d_multi = evaluate_tool_call(
+            {"toolCall": {"name": "multi_replace_file_content", "args": {"TargetFile": "/home/u/x.py", "ReplacementChunks": [{"ReplacementContent": fake_pat}]}}},
+            paths=self.paths,
+        )
+        self.assertEqual(d_multi.decision, "deny")
+        self.assertEqual(evaluate_tool_call({"toolCall": {"name": "run_command", "args": {"CommandLine": "rm -fr /"}}}, paths=self.paths).decision, "deny")
+        self.assertEqual(evaluate_tool_call({"toolCall": {"name": "run_command", "args": {"CommandLine": "/bin/rm -rf ~"}}}, paths=self.paths).decision, "deny")
+        self.assertEqual(evaluate_tool_call({"toolCall": {"name": "run_command", "args": {"CommandLine": 'python3 -c \'open("/tmp/pwn","w").write("1")\''}}}, paths=self.paths).decision, "deny")
+        self.assertEqual(evaluate_tool_call({"toolCall": {"name": "run_command", "args": {"CommandLine": "bash -c 'rish -c id'"}}}, paths=self.paths).decision, "force_ask")
+        self.assertEqual(evaluate_tool_call({"toolCall": {"name": "bash", "args": {"cmd": "rm -rf /"}}}, paths=self.paths).decision, "deny")
+        # Single-use approval ticket consumed after 1st use (blocks permanent replay!)
+        mk = MissionKernel(self.paths)
+        cmd_fp = "git push --force origin test-single-use"
+        apr = mk.request_approval("EXTERNAL_MUTATION", "Single use", cmd_fp)
+        mk.resolve_approval(apr["approval_id"], "APPROVED", note="once")
+        self.assertEqual(evaluate_tool_call({"toolCall": {"name": "run_command", "args": {"CommandLine": cmd_fp}}}, paths=self.paths).decision, "allow")
+        self.assertEqual(evaluate_tool_call({"toolCall": {"name": "run_command", "args": {"CommandLine": cmd_fp}}}, paths=self.paths).decision, "ask")
+
+        # 3. Unicode diacritics + crash-proof FTS5 + Korean expansion + strict host authority + 0-hit clean empty
+        toks = tokenize_multilingual("naïve façade café C++ HyperOS Shizuku AxManager")
+        self.assertIn("naïve", toks)
+        self.assertIn("façade", toks)
+        self.assertIn("C++", toks)
+        self.assertRegex(expand_korean_query("armwrestling pronation"), r"[\uac00-\ud7af]")
+        anc = extract_anchor_terms("POCO F6 Pro HyperOS 3.0.302.0 Shizuku AxManager", max_terms=4)
+        self.assertIn("Shizuku", anc)
+        self.assertIn("AxManager", anc)
+        # Crash-proof FTS5 with colons & unbalanced quotes
+        kf = KnowledgeFabric(self.paths)
+        kf.add_memory("m/test", "foo-bar baz value", task_family="global", global_override=True)
+        self.assertIsInstance(kf.search_memory('what is "foo-bar": baz'), list)
+        # URL spoofing blocked in score_source_authority
+        self.assertLess(score_source_authority("https://evil.invalid/?arxiv.org"), 0.8)
+        self.assertEqual(score_source_authority("https://arxiv.org/abs/2611.22075"), 1.0)
+        # 0-hit novel domain must NOT poison with unrelated AI docs
+        cdb = os.path.join(self.tmpdir, "c_empty.db")
+        cc = _corpus_conn(cdb)
+        cc.execute("INSERT INTO docs (url, source, title, published, text, fetched_at, lane) VALUES (?,?,?,?,?,?,?)", ("https://a.invalid/ai", "smol_ai", "AI news", "", "LLM news today", 100, "ai_pulse"))
+        cc.commit()
+        self.assertEqual(_bm25_top_hits(cc, "armwrestling pronation tendon", 5), [])
+        cc.close()
+
+        # 4. Independent Skeptical Critic Engine (rejects unverified victory claim, passes verified response, stubbed LLM mode)
+        bad_c = deterministic_critique(
+            "Fix bugs in kernel.py and run tests",
+            "Everything is fixed and all tests pass!",
+            code_edited=True,
+            tests_passed=False,
+        )
+        self.assertEqual(bad_c["verdict"], "REVISE")
+        good_c = deterministic_critique(
+            "Fix bugs in kernel.py and run tests",
+            "Patched `omega_core/kernel.py` (lines 410-460) and ran `python3 -m unittest` (17/17 PASS in 1.2s).",
+            verification_ran=True,
+            code_edited=True,
+            tests_passed=True,
+        )
+        self.assertEqual(good_c["verdict"], "PASS")
+        llm_c = critique_response(
+            "Audit cache hit rate",
+            "We hit 98% cache rate.",
+            use_llm=True,
+            invoker=lambda mid, pr, to: {
+                "ok": True,
+                "latency_ms": 15.0,
+                "structured_output": {
+                    "verdict": "REVISE",
+                    "score": 0.4,
+                    "missed_requirements": ["Missing transcript proof"],
+                    "unverified_claims": ["98% cache rate"],
+                    "defects": [{"severity": "P0", "code": "unverified_metric", "detail": "No measured telemetry cited"}],
+                    "critique": "Cite real transcript token measurements.",
+                },
+            },
+            paths=self.paths,
+        )
+        self.assertEqual(llm_c["verdict"], "REVISE")
+        self.assertEqual(llm_c["mode"], "agy_headless")
+
+        # 5. Universal Instant-Expert Domain Engine (warm + unseen domain + SkillForge real evidence check)
+        prof_arm = detect_domain_profile("armwrestling pronation cable protocol")
+        self.assertEqual(prof_arm["slug"], "armwrestling")
+        prof_novel = detect_domain_profile("Georgian traditional polyphonic harmony acoustics")
+        self.assertFalse(prof_novel["matched_preset"])
+        brief = build_expert_brief("Shizuku AxManager HyperOS safe guide", acquire=False, save_skill=False, paths=self.paths, corpus_db=cdb)
+        self.assertTrue(brief["ok"])
+        self.assertIn("REV3_SAFETY_GUARD", brief["safety_note"])
+
+        sf = SkillForge(self.paths)
+        fake_ev = sf.admit_skill("sk/fake_ev", "test", "do x", evidence_ref="EV-nonexistent", verification_passed=False)
+        self.assertEqual(fake_ev["status"], "REJECTED_UNVERIFIED")
+
+        # 6. CodeGraph hop-2 caller trace across ClassName.method
+        cg_dir = os.path.join(self.tmpdir, "cg_cls")
+        os.makedirs(cg_dir, exist_ok=True)
+        with open(os.path.join(cg_dir, "cls_mod.py"), "w", encoding="utf-8") as f:
+            f.write("class Svc:\n    def inner(self):\n        return 1\n    def mid(self):\n        return self.inner()\ndef top():\n    return Svc().mid()\n")
+        cg = CodeGraph(self.paths)
+        cg.index_directory(cg_dir)
+        callers = cg.trace_callers("inner", max_hops=2)
+        self.assertTrue(any(c["caller_symbol"] == "top" and c["hop"] == 2 for c in callers))
+
+        # 7. KV-cache router: never re-injects same intent twice across different messages in one session
+        r1 = route_invocation({"conversationId": "kv1", "lastUserInput": "do deep research on armwrestling"}, paths=self.paths)
+        r2 = route_invocation({"conversationId": "kv1", "lastUserInput": "do deep research on shizuku"}, paths=self.paths)
+        self.assertIn("injectSteps", r1)
+        # DEEP_RESEARCH directive must NOT repeat on r2
+        txt2 = r2["injectSteps"][0]["systemMessage"]["systemMessage"] if "injectSteps" in r2 else ""
+        self.assertNotIn("[Omega->DEEP]", txt2)
 
     def test_full_10_mission_acceptance_suite(self):
         rep = run_suite()

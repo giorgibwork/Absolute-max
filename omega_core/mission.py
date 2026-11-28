@@ -14,7 +14,16 @@ import time
 import uuid
 from typing import Any, Callable
 
-from . import R2_WORKSPACE, OmegaPaths, ensure_dirs, get_paths, tune_sqlite
+from . import (
+    R2_WORKSPACE,
+    SCHEMA_BIT_MISSION,
+    OmegaPaths,
+    ensure_dirs,
+    get_paths,
+    mark_schema_bit,
+    schema_has_bit,
+    tune_sqlite,
+)
 
 VALID_MISSION_STATES = (
     "DRAFT",
@@ -39,11 +48,15 @@ VALID_TASK_STATES = (
 VALID_PROBLEM_STATES = ("OPEN", "TESTING", "RESOLVED", "WONTFIX")
 
 
-def _connect(paths: OmegaPaths) -> sqlite3.Connection:
+def _connect(paths: OmegaPaths, *, read_only: bool = False) -> sqlite3.Connection:
     ensure_dirs(paths)
     conn = sqlite3.connect(paths.missions_db, timeout=5.0)
     conn.row_factory = sqlite3.Row
-    tune_sqlite(conn)
+    if schema_has_bit(conn, SCHEMA_BIT_MISSION):
+        tune_sqlite(conn, read_only=read_only)
+        conn.execute("PRAGMA foreign_keys=ON;")
+        return conn
+    tune_sqlite(conn, read_only=False)
     conn.execute("PRAGMA foreign_keys=ON;")
     conn.executescript(
         """
@@ -148,6 +161,7 @@ def _connect(paths: OmegaPaths) -> sqlite3.Connection:
         );
         """
     )
+    mark_schema_bit(conn, SCHEMA_BIT_MISSION)
     conn.commit()
     return conn
 

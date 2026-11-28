@@ -29,16 +29,23 @@ from . import (
     REV3_HARD_TO_RECOVER,
     REV4_IRREVERSIBLE,
     RING_NAMES,
+    SCHEMA_BIT_DELEGATION,
     OmegaPaths,
     ensure_dirs,
     get_paths,
+    mark_schema_bit,
+    schema_has_bit,
     tune_sqlite,
 )
 
-# 1. Always-DENY destructive / host-unsafe patterns (word-bounded)
+# 1. Always-DENY destructive / host-unsafe patterns (word-bounded, order-independent flags, absolute bin paths)
 HARD_DENY_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
-        re.compile(r"(?:^|[;&|]\s*)rm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(?:/|~|\$HOME)(?:\s|$|[;&|])"),
+        re.compile(
+            r"(?:^|[;&|]\s*|['\"(])(?:/(?:usr/)?bin/)?rm\s+"
+            r"(?:-[a-zA-Z]*(?:r[a-zA-Z]*f|f[a-zA-Z]*r)[a-zA-Z]*|--recursive\s+--force|-r\s+-f|-f\s+-r)\s+"
+            r"(?:/|~|\$HOME|\$\{HOME\}|/\*)(?:\s|$|[;&|'\"])"
+        ),
         "Blocked catastrophic recursive delete on root or home directory.",
     ),
     (
@@ -46,15 +53,15 @@ HARD_DENY_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "Blocked destructive self-truncation open(p,'w').write(open(p).read()); use a .bak copy.",
     ),
     (
-        re.compile(r"(?:^|[;&|]\s*)sed\s+-i(?:\s|$).*\.gemini/"),
+        re.compile(r"(?:^|[;&|]\s*|['\"])(?:/(?:usr/)?bin/)?sed\s+-i(?:\s|$).*\.gemini/"),
         "Blocked in-place sed -i on ~/.gemini/ config files; snapshot and copy-test first.",
     ),
     (
-        re.compile(r"(?:^|[\s>=:])/tmp(?:/|$|\s)"),
+        re.compile(r"(?:^|[\s>=:(\"'`])/tmp(?:/|$|[\s\"'`;)&|])"),
         "Blocked /tmp path on AntiGem Android (no /tmp exists); use $TMPDIR or ~/.",
     ),
     (
-        re.compile(r"\b(?:mkfs|dd\s+if=.*of=/dev/|shutdown|reboot)\b"),
+        re.compile(r"\b(?:mkfs(?:\.[a-z0-9]+)?|dd\s+if=.*of=/dev/|shutdown|reboot)\b"),
         "Blocked destructive system-level disk/power operation.",
     ),
 ]
@@ -70,15 +77,17 @@ SPEND_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
 ]
 
-# 3. Privilege escalation / consequential external mutations (require approval under PREPARE_ONLY)
+# 3. Privilege escalation / consequential external mutations (including nested bash -c / sh -c payloads)
 PRIVILEGE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
-        re.compile(r"(?:^|[;&|]\s*)(?:su|sudo)\b"),
+        re.compile(r"(?:^|[;&|]\s*|['\"(`]\s*)(?:/(?:usr/)?bin/)?(?:su|sudo)\b"),
         "Privilege escalation (su/sudo) requires explicit human approval.",
     ),
     (
         re.compile(
-            r"(?:^|[;&|]\s*)(?:adb|ladb|rish|shizuku|axsh)\b|\b(?:pm\s+(?:disable(?:-user)?|uninstall)|settings\s+(?:put|delete|reset)|device_config\s+(?:put|delete|set_sync_disabled_for_tests)|setprop)\b",
+            r"(?:^|[;&|]\s*|['\"(`]\s*)(?:adb|ladb|rish|shizuku|axsh)\b|"
+            r"\b(?:pm\s+(?:disable(?:-user)?|uninstall)|settings\s+(?:put|delete|reset)|"
+            r"device_config\s+(?:put|delete|set_sync_disabled_for_tests)|setprop)\b",
             re.IGNORECASE,
         ),
         "REV3_HARD_TO_RECOVER: Android uid 2000 / system-state mutation requires prior-state snapshot and explicit human approval.",
@@ -218,10 +227,37 @@ def screen_memory_write(
     return True, "OK"
 
 
+def _collect_string_leaves(obj: Any, out: list[str], *, depth: int = 0) -> None:
+    """Recursively collect all string values from nested args (e.g., ReplacementChunks)."""
+    if depth > 6 or len(out) > 200:
+        return
+    if isinstance(obj, str):
+        out.append(obj)
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            _collect_string_leaves(v, out, depth=depth + 1)
+    elif isinstance(obj, (list, tuple)):
+        for it in obj:
+            _collect_string_leaves(it, out, depth=depth + 1)
+
+
+def _is_within_root(target: str, root: str) -> bool:
+    """Symlink-safe containment check using realpath + commonpath (blocks sibling-prefix traversal)."""
+    try:
+        rt = os.path.realpath(os.path.expanduser(target))
+        rr = os.path.realpath(os.path.expanduser(root))
+        return os.path.commonpath([rt, rr]) == rr
+    except ValueError:
+        return False
+
+
 def _init_delegation_table(paths: OmegaPaths) -> sqlite3.Connection:
     ensure_dirs(paths)
     conn = sqlite3.connect(paths.missions_db, timeout=5.0)
-    tune_sqlite(conn)
+    if schema_has_bit(conn, SCHEMA_BIT_DELEGATION):
+        tune_sqlite(conn, read_only=False)
+        return conn
+    tune_sqlite(conn, read_only=False)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS delegation_log (
@@ -238,6 +274,7 @@ def _init_delegation_table(paths: OmegaPaths) -> sqlite3.Connection:
         );
         """
     )
+    mark_schema_bit(conn, SCHEMA_BIT_DELEGATION)
     conn.commit()
     return conn
 
@@ -278,22 +315,36 @@ def delegate_ring(
     return eff
 
 
-def _check_approved_ticket(paths: OmegaPaths, action_sig: str) -> str | None:
+def _check_approved_ticket(paths: OmegaPaths, action_sig: str, *, ttl_s: int = 3600) -> str | None:
+    """Single-use TTL-bounded approval ticket lookup (atomically marks CONSUMED to block replay)."""
     if not os.path.exists(paths.missions_db):
         return None
     try:
         conn = sqlite3.connect(paths.missions_db, timeout=2.0)
-        tune_sqlite(conn)
+        tune_sqlite(conn, read_only=False)
+        now = int(time.time())
+        ahash = hashlib.sha256(action_sig.encode("utf-8")).hexdigest()[:16]
         row = conn.execute(
             """
-            SELECT approval_id FROM approvals
-            WHERE status = 'APPROVED' AND (command_or_payload = ? OR action_hash = ?)
+            SELECT approval_id, resolved_at FROM approvals
+            WHERE status = 'APPROVED'
+              AND (command_or_payload = ? OR action_hash = ?)
+              AND (resolved_at = 0 OR resolved_at >= ?)
             ORDER BY resolved_at DESC LIMIT 1
             """,
-            (action_sig, hashlib.sha256(action_sig.encode("utf-8")).hexdigest()[:16]),
+            (action_sig, ahash, now - ttl_s),
         ).fetchone()
+        if not row:
+            conn.close()
+            return None
+        aid = row[0]
+        cur = conn.execute(
+            "UPDATE approvals SET status = 'CONSUMED' WHERE approval_id = ? AND status = 'APPROVED'",
+            (aid,),
+        )
+        conn.commit()
         conn.close()
-        return row[0] if row else None
+        return aid if cur.rowcount == 1 else None
     except Exception:
         return None
 
@@ -356,10 +407,31 @@ def evaluate_tool_call(
             ring_required=R3_EXTERNAL_APPROVED,
         )
 
-    cmd = str(args.get("CommandLine") or args.get("command") or "")
-    target_path = str(args.get("Path") or args.get("TargetFile") or args.get("path") or "")
+    cmd = str(args.get("CommandLine") or args.get("command") or args.get("cmd") or "")
+    target_path = str(
+        args.get("Path")
+        or args.get("TargetFile")
+        or args.get("AbsolutePath")
+        or args.get("file_path")
+        or args.get("path")
+        or ""
+    )
+    target_url = str(args.get("Url") or args.get("url") or "")
 
-    # 1. File write/edit capability ring + secret/sandbox checks (supports CLI & App/IDE tool names)
+    conv_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(payload.get("conversationId") or "default"))[:48] or "default"
+    st_path = os.path.join(p.state_dir, f"{conv_id}.json")
+
+    def _load_session_state() -> tuple[dict[str, Any] | None, bool]:
+        if not os.path.exists(st_path):
+            return None, False
+        try:
+            with open(st_path, "r", encoding="utf-8") as sf:
+                st = json.load(sf)
+            return (st if isinstance(st, dict) else {}), False
+        except Exception:
+            return None, True
+
+    # 1. File write/edit capability ring + recursive secret scan + symlink-safe sandbox checks
     if tool in WRITE_TOOLS:
         if caller_ring < R1_SANDBOX:
             return GateDecision(
@@ -369,23 +441,16 @@ def evaluate_tool_call(
                 ring_required=R2_WORKSPACE,
             )
         if caller_ring == R1_SANDBOX:
-            abs_target = os.path.abspath(os.path.expanduser(target_path))
-            abs_tmp = os.path.abspath(p.tmpdir)
-            abs_home = os.path.abspath(p.omega_home)
-            if not (abs_target.startswith(abs_tmp) or abs_target.startswith(abs_home)):
+            if not (_is_within_root(target_path, p.tmpdir) or _is_within_root(target_path, p.omega_home)):
                 return GateDecision(
                     decision="deny",
                     action_class="WORKSPACE_MUTATION",
                     reason=f"Sandbox ring R1_SANDBOX blocked write outside sandbox/tmpdir: {target_path}",
                     ring_required=R2_WORKSPACE,
                 )
-        content = str(
-            args.get("Content")
-            or args.get("CodeContent")
-            or args.get("Replacement")
-            or args.get("ReplacementContent")
-            or ""
-        )
+        leaves: list[str] = []
+        _collect_string_leaves(args, leaves)
+        full_payload_text = "\n".join(leaves)
         if TAINT_SINK_RX.search(target_path):
             return GateDecision(
                 decision="force_ask",
@@ -394,18 +459,33 @@ def evaluate_tool_call(
                 ring_required=R3_EXTERNAL_APPROVED,
                 reversibility_class=REV3_HARD_TO_RECOVER,
             )
-        sec_hits = scan_secrets(content)
+        sec_hits = scan_secrets(full_payload_text)
         if sec_hits:
             return GateDecision(
                 decision="deny",
                 action_class="SECRET_LEAK",
                 reason=f"Blocked writing raw secret material ({','.join(sec_hits)}) to {target_path}.",
                 ring_required=R3_EXTERNAL_APPROVED,
+                reversibility_class=REV4_IRREVERSIBLE,
             )
         return GateDecision("allow", "WORKSPACE_MUTATION", "Permitted workspace file edit.", R2_WORKSPACE, reversibility_class=REV1_RESTORABLE)
 
+    # 1b. SPIDES taint gate on read_file / view_file / read_url_content (blocks credential exfil after web taint)
+    if tool in ("read_file", "view_file", "read_url_content"):
+        probe_txt = f"{target_path} {target_url}"
+        if TAINT_SINK_RX.search(probe_txt):
+            st, corrupt = _load_session_state()
+            if corrupt or (st and st.get("tainted_web")):
+                return GateDecision(
+                    decision="force_ask",
+                    action_class="SPIDES_TAINT",
+                    reason=f"SPIDES taint gate: session touched untrusted web content and {tool} accesses sensitive path/URL.",
+                    ring_required=R3_EXTERNAL_APPROVED,
+                    reversibility_class=REV3_HARD_TO_RECOVER,
+                )
+
     # 2. Shell command classification & enforcement
-    if tool == "run_command" or cmd:
+    if tool in ("run_command", "bash", "sh") or cmd:
         action_class, req_ring, reason = classify_command(cmd)
         rev_cls = classify_reversibility(action_class, cmd=cmd, tool=tool)
         if action_class == "DESTRUCTIVE":
@@ -414,13 +494,14 @@ def evaluate_tool_call(
         if action_class in ("SPEND", "PRIVILEGE_CHANGE", "EXTERNAL_MUTATION"):
             approved = _check_approved_ticket(p, cmd)
             if approved:
-                return GateDecision("allow", action_class, f"Approved via ticket {approved}.", req_ring, approved, rev_cls)
+                return GateDecision("allow", action_class, f"Approved via single-use ticket {approved}.", req_ring, approved, rev_cls)
             if action_class == "SPEND":
                 return GateDecision("deny", action_class, reason, req_ring, reversibility_class=rev_cls)
+            # REV3 privilege / Android uid 2000 mutations ALWAYS force_ask unconditionally without a single-use ticket!
+            if action_class == "PRIVILEGE_CHANGE":
+                return GateDecision("force_ask", action_class, reason, req_ring, reversibility_class=rev_cls)
             if autonomy_mode == "PREPARE_ONLY" or caller_ring < R3_EXTERNAL_APPROVED:
-                # REV3 privilege / Android uid 2000 mutations use `force_ask` so cached grants can never bypass them
-                dec_str = "force_ask" if action_class == "PRIVILEGE_CHANGE" else "ask"
-                return GateDecision(dec_str, action_class, reason, req_ring, reversibility_class=rev_cls)
+                return GateDecision("ask", action_class, reason, req_ring, reversibility_class=rev_cls)
 
         if req_ring > caller_ring:
             return GateDecision(
@@ -432,36 +513,31 @@ def evaluate_tool_call(
             )
 
         # 3. Per-session circuit breaker + SPIDES taint gate
-        conv_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(payload.get("conversationId") or "default"))[:48] or "default"
-        st_path = os.path.join(p.state_dir, f"{conv_id}.json")
-        if os.path.exists(st_path):
-            try:
-                with open(st_path, "r", encoding="utf-8") as f:
-                    state = json.load(f)
-                cmd_hash = hashlib.sha256(f"{tool}:{cmd}".encode("utf-8")).hexdigest()[:16]
-                if state.get("last_fail_hash") == cmd_hash and int(state.get("fail_streak", 0)) >= 2:
-                    return GateDecision(
-                        decision="deny",
-                        action_class="CIRCUIT_BREAKER",
-                        reason="Circuit breaker tripped: identical command failed twice in a row. Inspect root cause first.",
-                        ring_required=caller_ring,
-                    )
-                if state.get("tainted_web") and TAINT_SINK_RX.search(cmd):
-                    return GateDecision(
-                        decision="ask",
-                        action_class="SPIDES_TAINT",
-                        reason="SPIDES taint gate: session read untrusted web content and command touches sensitive credentials.",
-                        ring_required=R3_EXTERNAL_APPROVED,
-                    )
-            except Exception:
-                # Corrupt session state file -> fail safe to ask on sensitive commands
-                if TAINT_SINK_RX.search(cmd):
-                    return GateDecision(
-                        decision="ask",
-                        action_class="SPIDES_TAINT",
-                        reason="Session taint state unreadable while accessing sensitive path.",
-                        ring_required=R3_EXTERNAL_APPROVED,
-                    )
+        state, corrupt = _load_session_state()
+        if corrupt:
+            if TAINT_SINK_RX.search(cmd):
+                return GateDecision(
+                    decision="ask",
+                    action_class="SPIDES_TAINT",
+                    reason="Session taint state unreadable while accessing sensitive path.",
+                    ring_required=R3_EXTERNAL_APPROVED,
+                )
+        elif state:
+            cmd_hash = hashlib.sha256(f"{tool}:{cmd}".encode("utf-8")).hexdigest()[:16]
+            if state.get("last_fail_hash") == cmd_hash and int(state.get("fail_streak", 0)) >= 2:
+                return GateDecision(
+                    decision="deny",
+                    action_class="CIRCUIT_BREAKER",
+                    reason="Circuit breaker tripped: identical command failed twice in a row. Inspect root cause first.",
+                    ring_required=caller_ring,
+                )
+            if state.get("tainted_web") and TAINT_SINK_RX.search(cmd):
+                return GateDecision(
+                    decision="ask",
+                    action_class="SPIDES_TAINT",
+                    reason="SPIDES taint gate: session read untrusted web content and command touches sensitive credentials.",
+                    ring_required=R3_EXTERNAL_APPROVED,
+                )
 
         # Strictly safe single-command REV0 read-only diagnostics auto-approve cleanly (zero shell chaining!)
         stripped_cmd = cmd.strip()

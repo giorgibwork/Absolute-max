@@ -67,11 +67,11 @@ def run_suite(*, write_baseline_path: str | None = None) -> dict[str, Any]:
     mk = MissionKernel(spaths)
     kf = KnowledgeFabric(spaths)
 
-    # Mission A: Direct-response lightest path routing
+    # Mission A: Direct-response primary model routing (Gemini 4 Neon XHigh pinned)
     def m_a():
         fab = IntelligenceFabric(spaths)
         sel = fab.select_chain("Convert 15000 steps to approximate km")
-        ok = sel["route"] == "fast_default" and sel["primary"] == "gemini-4-hydrogen-low"
+        ok = sel["route"] == "fast_default" and sel["primary"] == "gemini-4-neon-xhigh"
         return {"ok": ok, "route": sel["route"], "primary": sel["primary"]}
 
     # Mission B: Unfamiliar-problem Intent Compiler + Pro² Problem State

@@ -14,16 +14,27 @@ import sqlite3
 import time
 from typing import Any, Callable
 
-from . import OmegaPaths, ensure_dirs, get_paths, tune_sqlite
+from . import (
+    SCHEMA_BIT_DAG,
+    OmegaPaths,
+    ensure_dirs,
+    get_paths,
+    mark_schema_bit,
+    schema_has_bit,
+    tune_sqlite,
+)
 
 VALID_NODE_STATES = ("PENDING", "RUNNING", "COMPLETED", "FAILED", "SKIPPED")
 
 
-def _connect(paths: OmegaPaths) -> sqlite3.Connection:
+def _connect(paths: OmegaPaths, *, read_only: bool = False) -> sqlite3.Connection:
     ensure_dirs(paths)
     conn = sqlite3.connect(paths.missions_db, timeout=5.0)
     conn.row_factory = sqlite3.Row
-    tune_sqlite(conn)
+    if schema_has_bit(conn, SCHEMA_BIT_DAG):
+        tune_sqlite(conn, read_only=read_only)
+        return conn
+    tune_sqlite(conn, read_only=False)
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS dag_tasks (
@@ -43,6 +54,7 @@ def _connect(paths: OmegaPaths) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_dag_mission ON dag_tasks(mission_id, state);
         """
     )
+    mark_schema_bit(conn, SCHEMA_BIT_DAG)
     conn.commit()
     return conn
 
@@ -79,6 +91,10 @@ class MissionDAG:
                     title=excluded.title,
                     depends_on_json=excluded.depends_on_json,
                     payload_json=excluded.payload_json,
+                    state='PENDING',
+                    attempts=0,
+                    result_json='{}',
+                    error='',
                     max_retries=excluded.max_retries,
                     updated_at=excluded.updated_at
                 """,
@@ -190,8 +206,14 @@ class MissionDAG:
                         last_err = f"{type(e).__name__}: {e}"
                 return tid, False, max_tries, {}, last_err
 
+            # Crash-safe: mark all frontier tasks RUNNING before dispatching, then persist each immediately on completion
+            for node in frontier:
+                self._update_node(node["task_id"], "RUNNING", attempts=int(node.get("attempts", 0)))
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(frontier))) as ex:
-                for tid, ok, att, res, err in ex.map(_run_one, frontier):
+                fmap = {ex.submit(_run_one, node): node["task_id"] for node in frontier}
+                for fut in concurrent.futures.as_completed(fmap):
+                    tid, ok, att, res, err = fut.result()
                     self._update_node(tid, "COMPLETED" if ok else "FAILED", attempts=att, result=res, error=err)
 
         final_tasks = self.list_tasks()

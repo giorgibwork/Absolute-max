@@ -18,7 +18,19 @@ import time
 import uuid
 from typing import Any
 
-from . import R0_READONLY, R2_WORKSPACE, R3_EXTERNAL_APPROVED, OmegaPaths, ensure_dirs, get_paths, safe_fts_query, tune_sqlite
+from . import (
+    R0_READONLY,
+    R2_WORKSPACE,
+    R3_EXTERNAL_APPROVED,
+    SCHEMA_BIT_MEMORY,
+    OmegaPaths,
+    ensure_dirs,
+    get_paths,
+    mark_schema_bit,
+    safe_fts_query,
+    schema_has_bit,
+    tune_sqlite,
+)
 from .kernel import screen_memory_write
 from .mission import MissionKernel
 
@@ -28,11 +40,14 @@ VALID_VERIFICATION_STATUS = ("verified", "partial", "unverified", "failed")
 MAX_GREPMEM_LINES = 5000
 
 
-def connect_vault(paths: OmegaPaths) -> sqlite3.Connection:
+def connect_vault(paths: OmegaPaths, *, read_only: bool = False) -> sqlite3.Connection:
     ensure_dirs(paths)
     conn = sqlite3.connect(paths.vault_db, timeout=5.0)
     conn.row_factory = sqlite3.Row
-    tune_sqlite(conn)
+    if schema_has_bit(conn, SCHEMA_BIT_MEMORY):
+        tune_sqlite(conn, read_only=read_only)
+        return conn
+    tune_sqlite(conn, read_only=False)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS memories (
@@ -123,6 +138,7 @@ def connect_vault(paths: OmegaPaths) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_me_dst ON memory_edges(dst_key);
         """
     )
+    mark_schema_bit(conn, SCHEMA_BIT_MEMORY)
     conn.commit()
     return conn
 
@@ -285,7 +301,7 @@ class KnowledgeFabric:
         where_extra = " AND ".join(clauses)
 
         fts_q = safe_fts_query(q, mode="OR", max_terms=6)
-        conn = connect_vault(self.paths)
+        conn = connect_vault(self.paths, read_only=True)
         try:
             try:
                 rows = conn.execute(
@@ -373,7 +389,7 @@ class KnowledgeFabric:
 
         # Expand neighbors via Recursive CTE (respecting Scoped-ORC & capability_ring!)
         seed_keys = list(records.keys())[:6]
-        conn = connect_vault(self.paths)
+        conn = connect_vault(self.paths, read_only=True)
         try:
             placeholders = ",".join("?" for _ in seed_keys)
             rows = conn.execute(
@@ -548,29 +564,16 @@ class KnowledgeFabric:
         task_family: str = "general",
         mission_id: str = "",
     ) -> None:
-        ensure_dirs(self.paths)
-        rec = {
-            "ts": int(time.time()),
-            "event": event,
-            "family": task_family,
-            "mission_id": mission_id,
-            "data": data,
-        }
-        line = json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n"
-        with open(self.paths.grepmem_log, "a", encoding="utf-8") as f:
-            f.write(line)
-        # Bound log growth atomically
-        try:
-            if os.path.getsize(self.paths.grepmem_log) > 2_000_000:
-                with open(self.paths.grepmem_log, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-                if len(lines) > MAX_GREPMEM_LINES:
-                    tmp = self.paths.grepmem_log + ".tmp"
-                    with open(tmp, "w", encoding="utf-8") as f:
-                        f.writelines(lines[-MAX_GREPMEM_LINES:])
-                    os.replace(tmp, self.paths.grepmem_log)
-        except OSError:
-            pass
+        from . import append_grepmem_fast
+
+        append_grepmem_fast(
+            self.paths,
+            event,
+            data,
+            task_family=task_family,
+            mission_id=mission_id,
+            max_lines=MAX_GREPMEM_LINES,
+        )
 
     def grep_history(
         self,
@@ -676,7 +679,7 @@ class KnowledgeFabric:
                 pass
 
         # Layer 3: Scoped-ORC + Ring-Filtered Memories (Telegraphic Pointer Index OR Full)
-        conn = connect_vault(self.paths)
+        conn = connect_vault(self.paths, read_only=True)
         try:
             rows = conn.execute(
                 """

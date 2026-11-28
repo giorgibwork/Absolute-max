@@ -14,7 +14,16 @@ import sqlite3
 import time
 from typing import Any
 
-from . import OmegaPaths, ensure_dirs, get_paths, safe_fts_query, tune_sqlite
+from . import (
+    SCHEMA_BIT_CODEGRAPH,
+    OmegaPaths,
+    ensure_dirs,
+    get_paths,
+    mark_schema_bit,
+    safe_fts_query,
+    schema_has_bit,
+    tune_sqlite,
+)
 
 SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build", ".antigem"}
 
@@ -23,11 +32,14 @@ def _db_path(paths: OmegaPaths) -> str:
     return os.path.join(paths.omega_home, "codegraph.db")
 
 
-def _connect(paths: OmegaPaths) -> sqlite3.Connection:
+def _connect(paths: OmegaPaths, *, read_only: bool = False) -> sqlite3.Connection:
     ensure_dirs(paths)
     conn = sqlite3.connect(_db_path(paths), timeout=5.0)
     conn.row_factory = sqlite3.Row
-    tune_sqlite(conn)
+    if schema_has_bit(conn, SCHEMA_BIT_CODEGRAPH):
+        tune_sqlite(conn, read_only=read_only)
+        return conn
+    tune_sqlite(conn, read_only=False)
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS files (
@@ -77,6 +89,7 @@ def _connect(paths: OmegaPaths) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_edge_caller ON call_edges(caller_symbol);
         """
     )
+    mark_schema_bit(conn, SCHEMA_BIT_CODEGRAPH)
     conn.commit()
     return conn
 
@@ -210,11 +223,24 @@ class CodeGraph:
                     sig = f"{'async ' if isinstance(node, ast.AsyncFunctionDef) else ''}def {node.name}{_format_args(node.args)}"
                     doc = (ast.get_docstring(node) or "")[:240]
                     syms.append((fp, node.name, qn, "method" if prefix else "function", node.lineno, getattr(node, "end_lineno", node.lineno), sig, doc))
-                    for sub in ast.walk(node):
-                        if isinstance(sub, ast.Call):
-                            callee = _extract_callee(sub)
-                            if callee:
-                                edges.append((fp, qn, callee, getattr(sub, "lineno", node.lineno)))
+                    # Record calls belonging to this function, and recurse into nested defs
+                    for sub in node.body:
+                        if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                            visit_body([sub], qn)
+                        else:
+                            for desc in ast.walk(sub):
+                                if isinstance(desc, ast.Call):
+                                    callee = _extract_callee(desc)
+                                    if callee:
+                                        edges.append((fp, qn, callee, getattr(desc, "lineno", node.lineno)))
+                else:
+                    # Module-level calls (e.g. top-level scripts / entrypoints)
+                    if not prefix:
+                        for desc in ast.walk(node):
+                            if isinstance(desc, ast.Call):
+                                callee = _extract_callee(desc)
+                                if callee:
+                                    edges.append((fp, "<module>", callee, getattr(desc, "lineno", getattr(node, "lineno", 1))))
 
         visit_body(getattr(tree, "body", []))
         return syms, edges
@@ -225,7 +251,7 @@ class CodeGraph:
         if not q:
             return []
         fts_q = safe_fts_query(q, mode="OR", max_terms=5) or q
-        conn = _connect(self.paths)
+        conn = _connect(self.paths, read_only=True)
         try:
             try:
                 rows = conn.execute(
@@ -258,7 +284,7 @@ class CodeGraph:
 
     def trace_callers(self, symbol_name: str, max_hops: int = 2, limit: int = 25) -> list[dict[str, Any]]:
         """Multi-hop SQLite Recursive CTE upstream caller graph for impact analysis."""
-        conn = _connect(self.paths)
+        conn = _connect(self.paths, read_only=True)
         try:
             rows = conn.execute(
                 """
@@ -269,7 +295,10 @@ class CodeGraph:
                     UNION
                     SELECT e.caller_file, e.caller_symbol, e.callee_name, e.lineno, c.hop + 1
                     FROM call_edges e
-                    JOIN callers c ON e.callee_name = c.caller_symbol
+                    JOIN callers c ON (
+                        e.callee_name = c.caller_symbol
+                        OR (instr(c.caller_symbol, '.') > 0 AND e.callee_name = substr(c.caller_symbol, instr(c.caller_symbol, '.') + 1))
+                    )
                     WHERE c.hop < ?
                 )
                 SELECT DISTINCT caller_file, caller_symbol, callee_name, lineno, hop
@@ -285,7 +314,7 @@ class CodeGraph:
 
     def file_outline(self, file_path: str) -> list[dict[str, Any]]:
         ap = os.path.abspath(os.path.expanduser(file_path))
-        conn = _connect(self.paths)
+        conn = _connect(self.paths, read_only=True)
         try:
             rows = conn.execute(
                 "SELECT qualname, kind, start_line, end_line, signature FROM symbols WHERE file_path = ? ORDER BY start_line ASC",

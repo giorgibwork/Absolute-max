@@ -15,15 +15,27 @@ import sqlite3
 import time
 from typing import Any
 
-from . import OmegaPaths, ensure_dirs, get_paths, safe_fts_query, tune_sqlite
+from . import (
+    SCHEMA_BIT_FORGE,
+    OmegaPaths,
+    ensure_dirs,
+    get_paths,
+    mark_schema_bit,
+    safe_fts_query,
+    schema_has_bit,
+    tune_sqlite,
+)
 from .kernel import screen_memory_write
 
 
-def _connect(paths: OmegaPaths) -> sqlite3.Connection:
+def _connect(paths: OmegaPaths, *, read_only: bool = False) -> sqlite3.Connection:
     ensure_dirs(paths)
     conn = sqlite3.connect(paths.vault_db, timeout=5.0)
     conn.row_factory = sqlite3.Row
-    tune_sqlite(conn)
+    if schema_has_bit(conn, SCHEMA_BIT_FORGE):
+        tune_sqlite(conn, read_only=read_only)
+        return conn
+    tune_sqlite(conn, read_only=False)
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS forged_skills (
@@ -64,6 +76,7 @@ def _connect(paths: OmegaPaths) -> sqlite3.Connection:
         END;
         """
     )
+    mark_schema_bit(conn, SCHEMA_BIT_FORGE)
     conn.commit()
     return conn
 
@@ -89,12 +102,35 @@ class SkillForge:
         source_class: str = "verified_log",
     ) -> dict[str, Any]:
         """ANCHOR admission gate: admit only verified, clean, non-injected procedures."""
-        if not verification_passed and not evidence_ref.strip():
-            return {
-                "status": "REJECTED_UNVERIFIED",
-                "skill_id": skill_id,
-                "reason": "ANCHOR gate: procedural skill requires verification_passed=True or verified evidence_ref.",
-            }
+        eref = evidence_ref.strip()
+        if not verification_passed:
+            if not eref:
+                return {
+                    "status": "REJECTED_UNVERIFIED",
+                    "skill_id": skill_id,
+                    "reason": "ANCHOR gate: procedural skill requires verification_passed=True or verified evidence_ref.",
+                }
+            # Verify evidence_ref actually exists in `evidence` table with verification_status='verified'
+            vconn = _connect(self.paths, read_only=True)
+            try:
+                has_ev_tbl = vconn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='evidence'"
+                ).fetchone()
+                ev_ok = False
+                if has_ev_tbl:
+                    row = vconn.execute(
+                        "SELECT 1 FROM evidence WHERE evidence_id = ? AND verification_status = 'verified' LIMIT 1",
+                        (eref,),
+                    ).fetchone()
+                    ev_ok = row is not None
+            finally:
+                vconn.close()
+            if not ev_ok:
+                return {
+                    "status": "REJECTED_UNVERIFIED",
+                    "skill_id": skill_id,
+                    "reason": f"ANCHOR gate: evidence_ref '{eref}' not found as verified in evidence store.",
+                }
         ok, reason = screen_memory_write(f"{trigger_pattern}\n{procedure}", source_class, f"skill://{skill_id}")
         if not ok:
             return {"status": "QUARANTINED", "skill_id": skill_id, "reason": reason}
@@ -136,7 +172,7 @@ class SkillForge:
 
         fts_q = safe_fts_query(q, mode="OR", max_terms=6) or q
 
-        conn = _connect(self.paths)
+        conn = _connect(self.paths, read_only=True)
         try:
             try:
                 rows = conn.execute(

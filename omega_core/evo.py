@@ -23,7 +23,15 @@ import time
 import uuid
 from typing import Any, Callable
 
-from . import OmegaPaths, ensure_dirs, get_paths, tune_sqlite
+from . import (
+    SCHEMA_BIT_EVO,
+    OmegaPaths,
+    ensure_dirs,
+    get_paths,
+    mark_schema_bit,
+    schema_has_bit,
+    tune_sqlite,
+)
 from .mission import MissionKernel
 
 MODULAR_AXES = (
@@ -35,11 +43,14 @@ MODULAR_AXES = (
 )
 
 
-def _connect(paths: OmegaPaths) -> sqlite3.Connection:
+def _connect(paths: OmegaPaths, *, read_only: bool = False) -> sqlite3.Connection:
     ensure_dirs(paths)
     conn = sqlite3.connect(paths.evolution_db, timeout=5.0)
     conn.row_factory = sqlite3.Row
-    tune_sqlite(conn)
+    if schema_has_bit(conn, SCHEMA_BIT_EVO):
+        tune_sqlite(conn, read_only=read_only)
+        return conn
+    tune_sqlite(conn, read_only=False)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS sim_experiments (
@@ -61,6 +72,7 @@ def _connect(paths: OmegaPaths) -> sqlite3.Connection:
         );
         """
     )
+    mark_schema_bit(conn, SCHEMA_BIT_EVO)
     conn.commit()
     return conn
 

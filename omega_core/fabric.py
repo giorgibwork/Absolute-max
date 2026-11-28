@@ -16,7 +16,18 @@ import subprocess
 import time
 from typing import Any, Callable
 
-from . import OmegaPaths, ensure_dirs, get_paths, tune_sqlite
+from . import (
+    SCHEMA_BIT_FABRIC,
+    OmegaPaths,
+    ensure_dirs,
+    get_paths,
+    mark_schema_bit,
+    schema_has_bit,
+    tune_sqlite,
+)
+
+PRIMARY_MODEL = "gemini-4-neon-xhigh"
+CRITIC_MODEL = "gemini-4-carbon-high"
 
 DEFAULT_CATALOG: list[dict[str, Any]] = [
     {"model_id": "gemini-4-carbon-high", "provider_id": "antigravity", "family": "gemini-carbon", "roles": ["security_audit", "adversarial_review", "deep_arch", "max_reasoning"], "billing_status": "free"},
@@ -41,23 +52,23 @@ DEFAULT_CATALOG: list[dict[str, Any]] = [
 ROUTE_RULES: list[tuple[str, re.Pattern[str], list[str]]] = [
     (
         "security_audit",
-        re.compile(r"\b(?:audit|security|verify|adversarial|red[- ]?team|hostile|injection)\b", re.IGNORECASE),
+        re.compile(r"\b(?:audit|security|verify|adversarial|red[- ]?team|hostile|injection|critic|skeptic(?:al)?)\b", re.IGNORECASE),
         ["gemini-4-carbon-high", "gemini-4-neon-xhigh", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-medium"],
     ),
     (
         "deep_arch",
         re.compile(r"\b(?:architect|refactor|debug|patch|complex|multi[- ]?file|migration)\b", re.IGNORECASE),
-        ["gemini-4-neon-xhigh", "gemini-4-carbon-high", "gemini-4-neon-high", "gemini-4-hydrogen-high"],
+        ["gemini-4-neon-xhigh", "gemini-4-carbon-high", "gemini-4-neon-high", "gemini-4-hydrogen-xhigh"],
     ),
     (
         "orchestrator",
-        re.compile(r"\b(?:swarm|orchestrate|coordinate|maximize|optimize|research|benchmark)\b", re.IGNORECASE),
-        ["gemini-pro-orchestrator-neon", "gemini-pro-orchestrator-carbon", "gemini-4-neon-xhigh", "gemini-4-carbon-high"],
+        re.compile(r"\b(?:swarm|orchestrate|coordinate|maximize|optimize|research|benchmark|expert)\b", re.IGNORECASE),
+        ["gemini-4-neon-xhigh", "gemini-pro-orchestrator-neon", "gemini-4-carbon-high", "gemini-pro-orchestrator-carbon"],
     ),
     (
         "fast_default",
         re.compile(r".*"),
-        ["gemini-4-hydrogen-low", "gemini-3.5-flash-lite-low", "gemini-4-hydrogen-medium", "gemini-4-neon-low"],
+        ["gemini-4-neon-xhigh", "gemini-4-neon-high", "gemini-4-hydrogen-xhigh", "gemini-4-hydrogen-low"],
     ),
 ]
 
@@ -110,7 +121,59 @@ def infer_quota_pool(model_id: str) -> str:
     return "gemini_fast"
 
 
-def discover_agy_models(timeout_s: int = 8) -> list[dict[str, str]]:
+AUTH_ERR_MARKERS = (
+    "authentication required",
+    "please sign in",
+    "waiting for authentication",
+    "launch the cli without arguments to sign in",
+)
+
+
+def _has_auth_error(text: str) -> bool:
+    low = (text or "").lower()
+    return any(m in low for m in AUTH_ERR_MARKERS)
+
+
+def _agy_cli_auth_cached(paths: OmegaPaths | None = None, ttl_s: int = 300) -> bool:
+    """Fast-fail cached check of `agy` CLI OAuth (<2ms cached; max 3s cold probe; NEVER hangs 60s!)."""
+    p = paths or get_paths()
+    cache_fp = os.path.join(p.tmpdir, "agy_auth_probe.json")
+    now = time.time()
+    try:
+        if os.path.isfile(cache_fp):
+            with open(cache_fp, "r", encoding="utf-8") as f:
+                st = json.load(f)
+            if isinstance(st, dict) and (now - float(st.get("ts") or 0.0)) < ttl_s:
+                return bool(st.get("authed", False))
+    except Exception:
+        pass
+
+    authed = False
+    try:
+        r = subprocess.run(
+            ["agy", "models"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+        combined = (r.stdout or "") + "\n" + (r.stderr or "")
+        authed = (r.returncode == 0) and not _has_auth_error(combined)
+    except Exception:
+        authed = False
+
+    try:
+        os.makedirs(p.tmpdir, exist_ok=True)
+        tmp = f"{cache_fp}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"ts": now, "authed": authed}, f)
+        os.replace(tmp, cache_fp)
+    except Exception:
+        pass
+    return authed
+
+
+def discover_agy_models(timeout_s: int = 6) -> list[dict[str, str]]:
     """Query `agy models` live ($0.00, zero token burn) with fast-fail if CLI auth is missing."""
     try:
         r = subprocess.run(
@@ -123,7 +186,7 @@ def discover_agy_models(timeout_s: int = 8) -> list[dict[str, str]]:
     except Exception:
         return []
     combined = (r.stdout or "") + "\n" + (r.stderr or "")
-    if "Authentication required" in combined:
+    if _has_auth_error(combined):
         return []
     out: list[dict[str, str]] = []
     # Strip ANSI/carriage-return spinner artifacts cleanly
@@ -138,11 +201,14 @@ def discover_agy_models(timeout_s: int = 8) -> list[dict[str, str]]:
     return out
 
 
-def _connect(paths: OmegaPaths) -> sqlite3.Connection:
+def _connect(paths: OmegaPaths, *, read_only: bool = False) -> sqlite3.Connection:
     ensure_dirs(paths)
     conn = sqlite3.connect(paths.models_db, timeout=5.0)
     conn.row_factory = sqlite3.Row
-    tune_sqlite(conn)
+    if schema_has_bit(conn, SCHEMA_BIT_FABRIC):
+        tune_sqlite(conn, read_only=read_only)
+        return conn
+    tune_sqlite(conn, read_only=False)
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS model_qualifications (
@@ -206,6 +272,7 @@ def _connect(paths: OmegaPaths) -> sqlite3.Connection:
                 item["billing_status"],
             ),
         )
+    mark_schema_bit(conn, SCHEMA_BIT_FABRIC)
     conn.commit()
     return conn
 
@@ -231,8 +298,18 @@ def parse_agy_json_envelope(stdout: str) -> dict[str, Any]:
 
 
 def invoke_agy(model_id: str, prompt: str, timeout_s: int = 25, json_schema: str | dict[str, Any] | None = None) -> dict[str, Any]:
-    """Invoke a Gemini model via `agy -p --output-format json` with optional --json-schema and token/cache telemetry."""
+    """Invoke a Gemini model via `agy -p --output-format json` with fast-fail auth check (never hangs 60s!)."""
     t0 = time.monotonic()
+    if not _agy_cli_auth_cached():
+        return {
+            "ok": False,
+            "rc": 401,
+            "latency_ms": round((time.monotonic() - t0) * 1000.0, 1),
+            "text": "",
+            "structured_output": None,
+            "usage": {},
+            "error": "agy_cli_auth_required: run `agy` interactively once to sign in, or use native AntiGem subagents / GEMINI_API_KEY",
+        }
     cmd = [
         "agy",
         "--model",
@@ -257,7 +334,7 @@ def invoke_agy(model_id: str, prompt: str, timeout_s: int = 25, json_schema: str
         )
         elapsed_ms = round((time.monotonic() - t0) * 1000.0, 1)
         combined = (res.stdout or "") + "\n" + (res.stderr or "")
-        if "Authentication required" in combined:
+        if _has_auth_error(combined):
             return {
                 "ok": False,
                 "rc": 401,
@@ -414,7 +491,7 @@ class IntelligenceFabric:
         return {"discovered_live": len(found), "newly_added": added, "total_in_registry": total}
 
     def list_models(self) -> list[dict[str, Any]]:
-        conn = _connect(self.paths)
+        conn = _connect(self.paths, read_only=True)
         try:
             rows = conn.execute("SELECT * FROM model_qualifications ORDER BY family, model_id").fetchall()
             out = []
@@ -459,7 +536,7 @@ class IntelligenceFabric:
         """Select ordered primary + fallback model chain preferring QUALIFIED models."""
         ex = exclude or set()
         route_name = "fast_default"
-        preferred = ["gemini-4-hydrogen-low", "gemini-4-neon-high", "gemini-4-carbon-high"]
+        preferred = ["gemini-4-neon-xhigh", "gemini-4-neon-high", "gemini-4-carbon-high"]
         for name, rx, chain in ROUTE_RULES:
             if rx.search(task_text):
                 route_name = name
@@ -471,8 +548,8 @@ class IntelligenceFabric:
         def rank(mid: str) -> tuple[int, int]:
             q = quals.get(mid, {})
             st = q.get("qualification_state", "UNKNOWN")
-            # QUALIFIED (0) > UNKNOWN (1) > DEGRADED (2) > UNQUALIFIED (3)
-            prio = {"QUALIFIED": 0, "UNKNOWN": 1, "DEGRADED": 2, "UNQUALIFIED": 3}.get(st, 2)
+            # Keep primary preferred order (gemini-4-neon-xhigh!) across QUALIFIED/UNKNOWN; only demote DEGRADED/UNQUALIFIED
+            prio = {"QUALIFIED": 0, "UNKNOWN": 0, "DEGRADED": 1, "UNQUALIFIED": 2}.get(st, 1)
             return (prio, preferred.index(mid) if mid in preferred else 99)
 
         ordered = [m for m in preferred if m not in ex]

@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Thin AntiGem SessionStart adapter -> omega_core.memory.KnowledgeFabric.compile_context + bridge auto-wake."""
+"""KV-Cache-Stable AntiGem SessionStart adapter (OMEGA APEX v9.0).
+
+Maximizes Gemini 4 Neon 95%-discount Implicit Prefix Caching by keeping Step 0
+100% deterministic & static (`task_family="global"`, no cross-session mutable mission
+bleed into unrelated chats or subagents). Dynamic memories & forged expert skills
+auto-hydrate on-demand per turn via PreInvocation JIT hydration.
+"""
 from __future__ import annotations
 
 import json
@@ -14,7 +20,6 @@ if _REPO not in sys.path:
 
 from omega_core import R2_WORKSPACE
 from omega_core.memory import KnowledgeFabric
-from omega_core.mission import MissionKernel
 
 
 def main() -> None:
@@ -23,9 +28,9 @@ def main() -> None:
     except Exception:
         pass
 
-    # Keep permanent Gemini App MCP bridge awake
+    # Keep permanent Gemini App MCP bridge awake (guarded by flock inside start_mcp_bridge.sh)
     try:
-        with socket.create_connection(("127.0.0.1", 8765), timeout=0.15):
+        with socket.create_connection(("127.0.0.1", 8765), timeout=0.08):
             pass
     except OSError:
         bridge = os.path.expanduser("~/start_mcp_bridge.sh")
@@ -38,24 +43,13 @@ def main() -> None:
                 start_new_session=True,
             )
 
-    # Pick latest ACTIVE mission if any so problem state carries across sessions
-    active_mid = None
-    active_family = "global"
-    try:
-        mk = MissionKernel()
-        active = mk.list_missions(state="ACTIVE", limit=1)
-        if active:
-            active_mid = active[0]["mission_id"]
-            active_family = active[0].get("task_family") or "general"
-    except Exception:
-        pass
-
+    # Strictly deterministic static global L1 prefix -> maximizes cross-turn & cross-session KV-cache hits!
     kf = KnowledgeFabric()
     compiled = kf.compile_context(
-        task_family=active_family,
-        mission_id=active_mid,
+        task_family="global",
+        mission_id=None,
         caller_ring=R2_WORKSPACE,
-        budget_chars=2400,
+        budget_chars=2200,
         telegraphic=True,
     )
     ctx = compiled["context"].strip()

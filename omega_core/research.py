@@ -68,11 +68,19 @@ JA_TERM_MAP: list[tuple[re.Pattern[str], str]] = [
 
 RU_TERM_MAP: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(?:agent|llm|ai|gemini|antigravity|mcp|rag)\b", re.I), "ИИ агенты практика разбор"),
-    (re.compile(r"\b(?:android|kernel|linux|security|reverse|perf|sqlite)\b", re.I), "оптимизация разбор практика"),
-    (re.compile(r"\b(?:armwrestling|strength|gym|pronation)\b", re.I), "армрестлинг тренировка биомеханика"),
+    (re.compile(r"\b(?:android|hyperos|shizuku|axmanager|poco|kernel|linux|security|reverse|perf|sqlite)\b", re.I), "оптимизация разбор практика"),
+    (re.compile(r"\b(?:armwrestling|strength|gym|pronation|tendon)\b", re.I), "армрестлинг тренировка биомеханика"),
+    (re.compile(r"\b(?:trading|quant|polymarket|crypto|market)\b", re.I), "трейдинг кванты стратегия"),
 ]
 
-UA = "OmegaApexResearch/8.0 (Android; $0.00 pure-stdlib)"
+KO_TERM_MAP: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b(?:agent|llm|ai|gemini|antigravity|mcp|rag|cli)\b", re.I), "에이전트 실전 벤치마크"),
+    (re.compile(r"\b(?:android|hyperos|shizuku|poco|linux|sqlite|python|perf|cache)\b", re.I), "최적화 실전 트러블슈팅"),
+    (re.compile(r"\b(?:armwrestling|strength|gym|pronation)\b", re.I), "팔씨름 훈련 생체역학"),
+    (re.compile(r"\b(?:trading|quant|polymarket|market)\b", re.I), "퀀트 전략 백테스트"),
+]
+
+UA = "OmegaApexResearch/9.0 (Android; $0.00 pure-stdlib)"
 
 
 def is_date_sensitive(question: str) -> bool:
@@ -86,12 +94,35 @@ STOPWORDS = {
 }
 
 
-def extract_anchor_terms(question: str, max_terms: int = 3) -> str:
-    """Trim long questions to top 2-3 multilingual anchor keywords for strict-AND engines (GitHub, HN, arXiv, Qiita)."""
-    tokens = tokenize_multilingual(question, min_latin=2, min_cjk=2, max_tokens=20)
+def extract_anchor_terms(question: str, max_terms: int = 4) -> str:
+    """Extract top distinctive multilingual anchor keywords preserving key technical nouns (e.g. HyperOS, Shizuku, AxManager)."""
+    tokens = tokenize_multilingual(question, min_latin=2, min_cjk=2, max_tokens=24)
     anchors = [t for t in tokens if t.lower() not in STOPWORDS]
-    dedup = list(dict.fromkeys(anchors))[:max_terms]
-    return " ".join(dedup) if dedup else question.strip()[:60]
+    dedup = list(dict.fromkeys(anchors))
+    if len(dedup) <= max_terms:
+        return " ".join(dedup) if dedup else question.strip()[:60]
+    # Keep first core term + prioritize distinctive technical/CamelCase/acronym-with-digit nouns over filler
+    picked = [dedup[0]]
+    rest = [t for t in dedup[1:] if not re.fullmatch(r"\d+(?:\.\d+)+", t)]
+    rest.sort(key=lambda t: (bool(re.search(r"[A-Z][a-z]+[A-Z]|^[A-Z][A-Z0-9]{2,}$", t)), len(t)), reverse=True)
+    for t in rest:
+        if len(picked) >= max_terms:
+            break
+        picked.append(t)
+    return " ".join(picked)
+
+
+def expand_korean_query(question: str) -> str:
+    """Build a tight Korean technical query for GeekNews / KR developer search."""
+    if re.search(r"[\uac00-\ud7af]", question):
+        return extract_anchor_terms(question, max_terms=3)
+    ko_anchor = "실전"
+    for rx, ko in KO_TERM_MAP:
+        if rx.search(question):
+            ko_anchor = ko.split()[0]
+            break
+    core_en = extract_anchor_terms(question, max_terms=2)
+    return f"{core_en} {ko_anchor}".strip()
 
 
 def expand_chinese_query(question: str) -> str:
@@ -232,38 +263,44 @@ def _discover_qiita_jp(query: str, limit: int = 4) -> list[dict[str, str]]:
 
 
 def _discover_lobsters(query: str, limit: int = 4) -> list[dict[str, str]]:
-    """Lobsters senior-engineer anti-hype AI & systems feed ($0.00)."""
-    data = _http_get_json("https://lobste.rs/t/ai.json", timeout=8)
-    if not isinstance(data, list):
-        return []
+    """Lobsters senior-engineer anti-hype feed across both newest & AI tags ($0.00)."""
     toks = [t.lower() for t in tokenize_multilingual(query, min_latin=3, max_tokens=6)]
-    out = []
-    for it in data:
-        title = str(it.get("title") or "")
-        desc = str(it.get("description") or "")
-        blob = (title + " " + desc + " " + " ".join(it.get("tags") or [])).lower()
-        if toks and not any(t in blob for t in toks):
+    is_ai = bool(re.search(r"\b(?:ai|llm|agent|gemini|model|rag|mcp|prompt)\b", query, re.I))
+    endpoints = ["https://lobste.rs/t/ai.json", "https://lobste.rs/newest.json"] if is_ai else ["https://lobste.rs/newest.json", "https://lobste.rs/hottest.json"]
+    out: list[dict[str, str]] = []
+    seen_u: set[str] = set()
+    for ep in endpoints:
+        data = _http_get_json(ep, timeout=8)
+        if not isinstance(data, list):
             continue
-        u = str(it.get("url") or it.get("comments_url") or "")
-        if u.startswith("http"):
-            out.append(
-                {
-                    "lane": "hostile",
-                    "source": f"lobsters(score={it.get('score', 0)})",
-                    "url": u,
-                    "title": title[:180],
-                    "snippet": (desc or title)[:500],
-                    "published_at": str(it.get("created_at") or "")[:20],
-                }
-            )
-            if len(out) >= limit:
-                break
+        for it in data:
+            title = str(it.get("title") or "")
+            desc = str(it.get("description") or "")
+            blob = (title + " " + desc + " " + " ".join(it.get("tags") or [])).lower()
+            if toks and not any(t in blob for t in toks):
+                continue
+            u = str(it.get("url") or it.get("comments_url") or "")
+            if u.startswith("http") and u not in seen_u:
+                seen_u.add(u)
+                out.append(
+                    {
+                        "lane": "hostile",
+                        "source": f"lobsters(score={it.get('score', 0)})",
+                        "url": u,
+                        "title": title[:180],
+                        "snippet": (desc or title)[:500],
+                        "published_at": str(it.get("created_at") or "")[:20],
+                    }
+                )
+                if len(out) >= limit:
+                    return out
     return out
 
 
 def _discover_habr_ru(query: str, limit: int = 4) -> list[dict[str, str]]:
-    """Russian Habr AI & systems RSS feed filtered by query ($0.00)."""
-    url = "https://habr.com/ru/rss/hubs/artificial_intelligence/articles/?fl=ru"
+    """Russian Habr universal search RSS across ANY domain (Android, biomechanics, systems, AI, $0.00)."""
+    ru_q = urllib.parse.quote(expand_russian_query(query))
+    url = f"https://habr.com/ru/rss/search/?q={ru_q}&order_by=relevance&target_type=posts"
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     try:
         with urllib.request.urlopen(req, timeout=8) as r:
@@ -271,7 +308,6 @@ def _discover_habr_ru(query: str, limit: int = 4) -> list[dict[str, str]]:
         root = ET.fromstring(xml_raw)
     except Exception:
         return []
-    toks = [t.lower() for t in tokenize_multilingual(query, min_latin=3, max_tokens=6)]
     out = []
     for item in root.findall(".//item"):
         title = (item.findtext("title") or "").strip()
@@ -279,9 +315,6 @@ def _discover_habr_ru(query: str, limit: int = 4) -> list[dict[str, str]]:
         desc = re.sub(r"<[^>]+>", " ", (item.findtext("description") or ""))
         desc = re.sub(r"\s+", " ", desc).strip()
         pub = (item.findtext("pubDate") or "")[:25]
-        blob = (title + " " + desc).lower()
-        if toks and not any(t in blob for t in toks):
-            continue
         if link.startswith("http"):
             out.append(
                 {
@@ -291,6 +324,43 @@ def _discover_habr_ru(query: str, limit: int = 4) -> list[dict[str, str]]:
                     "title": title[:180],
                     "snippet": desc[:500],
                     "published_at": pub,
+                }
+            )
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _discover_geeknews_kr(query: str, limit: int = 4) -> list[dict[str, str]]:
+    """Korean GeekNews RSS filtered by multilingual query anchors ($0.00)."""
+    req = urllib.request.Request("https://news.hada.io/rss/news", headers={"User-Agent": UA})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            xml_raw = r.read(163840)
+        root = ET.fromstring(xml_raw)
+    except Exception:
+        return []
+    toks = [t.lower() for t in tokenize_multilingual(query + " " + expand_korean_query(query), min_latin=3, min_cjk=2, max_tokens=8)]
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+    out = []
+    for ent in root.findall("a:entry", ns):
+        title = (ent.findtext("a:title", "", ns) or "").strip()
+        lk_el = ent.find("a:link", ns)
+        link = str(lk_el.get("href") or "") if lk_el is not None else ""
+        body = re.sub(r"<[^>]+>", " ", (ent.findtext("a:content", "", ns) or ent.findtext("a:summary", "", ns) or ""))
+        body = re.sub(r"\s+", " ", body).strip()
+        blob = (title + " " + body).lower()
+        if toks and not any(t in blob for t in toks):
+            continue
+        if link.startswith("http"):
+            out.append(
+                {
+                    "lane": "multilingual",
+                    "source": "geeknews_kr",
+                    "url": link,
+                    "title": title[:180],
+                    "snippet": (body or title)[:500],
+                    "published_at": (ent.findtext("a:updated", "", ns) or "")[:20],
                 }
             )
             if len(out) >= limit:
@@ -532,6 +602,7 @@ def live_discover_multi_index(
         tasks += [
             ("gitee_cn", _discover_gitee_cn, (query, 4)),
             ("habr_ru", _discover_habr_ru, (query, 4)),
+            ("geeknews_kr", _discover_geeknews_kr, (query, 4)),
             ("openalex", _discover_openalex, (anchor_q, 4)),
             ("stackoverflow", _discover_stackexchange, (anchor_q, 4)),
             ("europe_pmc", _discover_europe_pmc, (anchor_q, 3)),
@@ -539,17 +610,25 @@ def live_discover_multi_index(
 
     discovered: list[dict[str, str]] = []
     indexes_used: list[str] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(tasks))) as ex:
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(tasks)))
+    try:
         fut_map = {ex.submit(fn, *args): name for name, fn, args in tasks}
-        for fut in concurrent.futures.as_completed(fut_map, timeout=14):
-            name = fut_map[fut]
-            try:
-                res = fut.result(timeout=1)
-                if res:
-                    indexes_used.append(name)
-                    discovered.extend(res)
-            except Exception:
-                pass
+        try:
+            for fut in concurrent.futures.as_completed(fut_map, timeout=14):
+                name = fut_map[fut]
+                try:
+                    res = fut.result(timeout=1)
+                    if res:
+                        indexes_used.append(name)
+                        discovered.extend(res)
+                except Exception:
+                    pass
+        except concurrent.futures.TimeoutError:
+            for fut in fut_map:
+                if not fut.done():
+                    fut.cancel()
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
     return discovered, sorted(indexes_used)
 
 
@@ -611,9 +690,8 @@ class ResearchEngine:
         errors: list[str] = []
         cache_hits = 0
 
-        # Step 2: Prior knowledge & multilingual memory retrieval BEFORE paying rediscovery cost
-        fts_q = safe_fts_query(question, mode="OR", max_terms=6)
-        prior_mems = self.kf.search_memory(fts_q, task_family=task_family, limit=5) if fts_q else []
+        # Step 2: Prior knowledge & multilingual memory retrieval BEFORE paying rediscovery cost (pass raw question!)
+        prior_mems = self.kf.search_memory(question, task_family=task_family, limit=5) if question.strip() else []
         if prior_mems:
             t_first = round((time.monotonic() - t0) * 1000.0, 1)
             for pm in prior_mems:
@@ -699,12 +777,13 @@ class ResearchEngine:
             else:
                 urls_to_fetch.append(u)
 
-        # Step 7: In-process pooled HTTP/2 + trafilatura full-text fetch (zero subprocess overhead)
+        # Step 7: In-process pooled HTTP/2 + trafilatura full-text fetch (honors cfg["max_urls"] & preserves hostile lane!)
+        url_lane_map = {d["url"].strip().rstrip("/"): str(d.get("lane") or "primary") for d in discovered_meta if d.get("url")}
         fetched_ok = 0
         if not offline and urls_to_fetch:
             from .omni import UA as OMNI_UA, fetch_public_page
 
-            targets = urls_to_fetch[:10]
+            targets = urls_to_fetch[: cfg["max_urls"]]
             shared_cli = None
             try:
                 import httpx  # type: ignore
@@ -726,6 +805,7 @@ class ResearchEngine:
                 for pg in pages:
                     if pg.get("ok") and pg.get("text"):
                         fetched_ok += 1
+                        lane = url_lane_map.get(pg["url"].strip().rstrip("/"), "primary")
                         ev = self.kf.record_evidence(
                             claim_text=f"Primary page [{pg.get('title', '')[:80]}] for: {question[:100]}",
                             source_id=f"omni:{pg.get('engine', 'http')}",
@@ -734,12 +814,15 @@ class ResearchEngine:
                             mission_id=mission_id,
                             source_type="primary",
                             retrieval_scope="full_text",
-                            support_type="supports",
+                            support_type="refutes" if lane == "hostile" else "supports",
                             verification_method="live_http_fetch",
                             verification_status="verified",
                         )
                         evidence_ids.append(ev["evidence_id"])
-                        positive_snippets.append(f"[primary:{pg['url']}] {pg['text'][:1000]}")
+                        if lane == "hostile":
+                            hostile_snippets.append(f"[hostile_page:{pg['url']}] {pg['text'][:1000]}")
+                        else:
+                            positive_snippets.append(f"[primary:{pg['url']}] {pg['text'][:1000]}")
                     elif pg.get("error"):
                         errors.append(f"fetch:{pg.get('url','')[:60]}:{pg['error']}")
             finally:
@@ -799,6 +882,7 @@ class ResearchEngine:
             "chinese_query": zh_query,
             "japanese_query": expand_japanese_query(question),
             "russian_query": expand_russian_query(question),
+            "korean_query": expand_korean_query(question),
             "indexes_hit": indexes_hit,
             "indexes_count": len(indexes_hit),
             "lane_counts": lane_counts,
