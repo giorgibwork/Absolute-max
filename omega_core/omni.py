@@ -29,7 +29,7 @@ from typing import Any
 
 warnings.filterwarnings("ignore", message=".*SOCKS support in urllib3.*")
 
-from . import OmegaPaths, ensure_dirs, get_paths
+from . import OmegaPaths, ensure_dirs, get_paths, tune_sqlite
 from .research import (
     _discover_arxiv,
     _discover_github_issues,
@@ -168,10 +168,30 @@ def extract_clean_text(html_txt: str, url: str = "") -> tuple[str, str, list[str
     return title, re.sub(r"\s+", " ", " ".join(p.chunks)).strip(), links
 
 
-def fetch_public_page(url: str, timeout: int = 7) -> dict[str, Any]:
-    """Fetch a public HTTP(S) page via httpx[http2] -> urllib; skips anti-bot/CAPTCHA gates honestly."""
+def fetch_public_page(url: str, timeout: int = 7, client: Any | None = None) -> dict[str, Any]:
+    """Fetch a public HTTP(S) page via pooled httpx[http2] -> urllib; skips anti-bot/CAPTCHA gates honestly."""
     t0 = time.monotonic()
     try:
+        if client is not None:
+            r = client.get(url, timeout=timeout)
+            if r.status_code >= 400:
+                return {"ok": False, "url": url, "status": r.status_code, "error": f"HTTP {r.status_code}"}
+            raw = r.content[:MAX_PAGE_BYTES]
+            html_txt = raw.decode("utf-8", errors="replace")
+            if _is_gated(html_txt):
+                return {"ok": False, "url": url, "status": r.status_code, "error": "gated_antibot_skipped"}
+            title, text, links = extract_clean_text(html_txt, url=str(r.url))
+            return {
+                "ok": bool(len(text) > 80),
+                "engine": "httpx_http2_pool",
+                "url": str(r.url),
+                "status": r.status_code,
+                "title": title or str(r.url),
+                "text": text[:10000],
+                "links": links,
+                "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
+                "ms": round((time.monotonic() - t0) * 1000.0, 1),
+            }
         import httpx  # type: ignore
 
         with httpx.Client(http2=True, follow_redirects=True, timeout=timeout, headers={"User-Agent": UA}) as cli:
@@ -313,8 +333,7 @@ def discover_ddgs(query: str, max_results: int = 25) -> list[dict[str, str]]:
 def _corpus_conn(db_path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=10.0)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout=5000;")
+    tune_sqlite(conn)
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS docs (
@@ -349,6 +368,52 @@ def _corpus_conn(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+def _bm25_top_hits(conn: sqlite3.Connection, anchor: str, top_k: int) -> list[tuple]:
+    """AND-first BM25 FTS5 retrieval (high precision) with graceful OR fallback."""
+    tokens = list(dict.fromkeys(re.findall(r"[A-Za-z0-9_]{3,}", anchor)))
+    if not tokens:
+        return conn.execute(
+            "SELECT url, source, title, published, substr(text, 1, 180) FROM docs ORDER BY fetched_at DESC LIMIT ?",
+            (top_k,),
+        ).fetchall()
+
+    seen: set[str] = set()
+    hits: list[tuple] = []
+    queries = []
+    if len(tokens) >= 2:
+        queries.append(" AND ".join(tokens[:3]))
+    queries.append(" OR ".join(tokens[:5]))
+
+    for q in queries:
+        if len(hits) >= top_k:
+            break
+        try:
+            batch = conn.execute(
+                """
+                SELECT d.url, d.source, d.title, d.published, substr(d.text, 1, 180)
+                FROM docs_fts f JOIN docs d ON d.id = f.rowid
+                WHERE docs_fts MATCH ?
+                ORDER BY bm25(docs_fts) LIMIT ?
+                """,
+                (q, top_k * 2),
+            ).fetchall()
+            for r in batch:
+                if r[0] not in seen:
+                    seen.add(r[0])
+                    hits.append(r)
+                    if len(hits) >= top_k:
+                        break
+        except sqlite3.OperationalError:
+            continue
+
+    if not hits:
+        hits = conn.execute(
+            "SELECT url, source, title, published, substr(text, 1, 180) FROM docs ORDER BY fetched_at DESC LIMIT ?",
+            (top_k,),
+        ).fetchall()
+    return hits[:top_k]
+
+
 def query_local_corpus(topic: str, *, db_path: str | None = None, top_k: int = 8) -> dict[str, Any]:
     """<5ms local SQLite FTS5 BM25 query against already-crawled bulk pages (0 network, 0 LLM tokens)."""
     t0 = time.monotonic()
@@ -356,25 +421,10 @@ def query_local_corpus(topic: str, *, db_path: str | None = None, top_k: int = 8
     if not os.path.isfile(db):
         return {"topic": topic, "db_path": db, "total_docs_in_db": 0, "elapsed_ms": 0.0, "top_hits": []}
     anchor = extract_anchor_terms(topic, max_terms=4)
-    kw = " OR ".join(re.findall(r"[A-Za-z0-9_]{3,}", anchor)) or anchor
     conn = _corpus_conn(db)
     try:
         total = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
-        try:
-            rows = conn.execute(
-                """
-                SELECT d.url, d.source, d.title, d.published, substr(d.text, 1, 180)
-                FROM docs_fts f JOIN docs d ON d.id = f.rowid
-                WHERE docs_fts MATCH ?
-                ORDER BY bm25(docs_fts) LIMIT ?
-                """,
-                (kw, top_k),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            rows = conn.execute(
-                "SELECT url, source, title, published, substr(text, 1, 180) FROM docs ORDER BY fetched_at DESC LIMIT ?",
-                (top_k,),
-            ).fetchall()
+        rows = _bm25_top_hits(conn, anchor, top_k)
     finally:
         conn.close()
     return {
@@ -496,40 +546,73 @@ def bulk_crawl(
             except Exception:
                 pass
 
-    # 2. Threaded full-page fetch + 1-hop BFS expansion on top web seeds (respects target_pages cap)
+    # 2. Threaded full-page fetch with shared HTTP/2 connection pool + 1-hop BFS expansion
     seen_urls: set[str] = set()
     queue = collections.deque(dict.fromkeys(seed_urls))
     fetched_full = 0
     gated_skipped = 0
     crawl_cap = min(follow_bfs_pages, max(20, target_pages - len(rows) + 40))
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-        while queue and fetched_full < crawl_cap:
-            batch: list[str] = []
-            while queue and len(batch) < max_workers and (fetched_full + len(batch)) < crawl_cap:
-                u = queue.popleft()
-                if u not in seen_urls and not u.endswith((".pdf", ".zip", ".png", ".jpg", ".mp4")):
-                    seen_urls.add(u)
-                    batch.append(u)
-            if not batch:
-                break
-            for res in ex.map(lambda u: fetch_public_page(u, timeout=6), batch):
-                if res.get("ok"):
-                    fetched_full += 1
-                    rows.append(
-                        {
-                            "url": res["url"],
-                            "source": f"full:{res.get('engine', 'http')}",
-                            "title": res.get("title", res["url"])[:180],
-                            "published": "",
-                            "text": res["text"][:10000],
-                        }
-                    )
-                    for lk in res.get("links", [])[:4]:
-                        if lk not in seen_urls and len(queue) < crawl_cap * 3:
-                            queue.append(lk)
-                elif res.get("error") == "gated_antibot_skipped":
-                    gated_skipped += 1
+    shared_cli = None
+    try:
+        import httpx  # type: ignore
+
+        shared_cli = httpx.Client(
+            http2=True,
+            follow_redirects=True,
+            timeout=6,
+            headers={"User-Agent": UA},
+            limits=httpx.Limits(max_connections=max_workers * 2, max_keepalive_connections=max_workers),
+        )
+    except Exception:
+        shared_cli = None
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            while queue and fetched_full < crawl_cap:
+                batch: list[str] = []
+                while queue and len(batch) < max_workers and (fetched_full + len(batch)) < crawl_cap:
+                    u = queue.popleft()
+                    if u not in seen_urls and not u.endswith((".pdf", ".zip", ".png", ".jpg", ".mp4")):
+                        seen_urls.add(u)
+                        batch.append(u)
+                if not batch:
+                    break
+                for res in ex.map(lambda u: fetch_public_page(u, timeout=6, client=shared_cli), batch):
+                    if res.get("ok"):
+                        fetched_full += 1
+                        rows.append(
+                            {
+                                "url": res["url"],
+                                "source": f"full:{res.get('engine', 'http')}",
+                                "title": res.get("title", res["url"])[:180],
+                                "published": "",
+                                "text": res["text"][:10000],
+                            }
+                        )
+                        for lk in res.get("links", [])[:4]:
+                            if lk not in seen_urls and len(queue) < crawl_cap * 3:
+                                queue.append(lk)
+                    elif res.get("error") == "gated_antibot_skipped":
+                        gated_skipped += 1
+    finally:
+        if shared_cli is not None:
+            try:
+                shared_cli.close()
+            except Exception:
+                pass
+
+    # Filter off-topic StackOverflow hits (require >=2 topic terms in title+text)
+    topic_terms = [w for w in re.findall(r"[a-z0-9]{4,}", topic.lower()) if w not in {"2025", "2026", "with", "from", "that", "this"}]
+    if len(topic_terms) >= 2:
+        filtered_rows = []
+        for r in rows:
+            if r.get("source", "").startswith("stackoverflow"):
+                blob = (r.get("title", "") + " " + r.get("text", "")).lower()
+                if sum(1 for w in topic_terms if w in blob) < 2:
+                    continue
+            filtered_rows.append(r)
+        rows = filtered_rows
 
     # 3. Epistemic Guard mirror collapse + deduplicate & save batch into SQLite FTS5
     unique_rows, mirrors_collapsed = collapse_syndicated_mirrors(rows)
@@ -553,23 +636,8 @@ def bulk_crawl(
         conn.commit()
         total_in_db = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
 
-        # Return ultra-compact top_k BM25 hits (<2.5KB) so the LLM reads high-signal proof with near-zero token overhead!
-        kw = " OR ".join(re.findall(r"[A-Za-z0-9_]{3,}", anchor)) or anchor
-        try:
-            top = conn.execute(
-                """
-                SELECT d.url, d.source, d.title, d.published, substr(d.text, 1, 180)
-                FROM docs_fts f JOIN docs d ON d.id = f.rowid
-                WHERE docs_fts MATCH ?
-                ORDER BY bm25(docs_fts) LIMIT ?
-                """,
-                (kw, top_k),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            top = conn.execute(
-                "SELECT url, source, title, published, substr(text, 1, 180) FROM docs ORDER BY fetched_at DESC LIMIT ?",
-                (top_k,),
-            ).fetchall()
+        # Return ultra-compact top_k AND-first BM25 hits (<2.5KB) at 0 LLM tokens!
+        top = _bm25_top_hits(conn, anchor, top_k)
     finally:
         conn.close()
 

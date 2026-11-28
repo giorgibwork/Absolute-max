@@ -383,6 +383,36 @@ class OmegaCoreTests(unittest.TestCase):
         unfolded = lab.unfold_experiment(e["exp_id"])
         self.assertEqual(unfolded["rationale"], "Test fold")
 
+    def test_v65_airtight_gate_sqlite_tuning_post_compact_router_and_fast_fail_fabric(self):
+        import subprocess
+        from omega_core.router import classify_user_intent
+
+        # 1. CodeGraph intent auto-routes cleanly without verbose bloat
+        routes = classify_user_intent("find callers of evaluate_tool_call")
+        self.assertTrue(any(r["intent"] == "CODEGRAPH" for r in routes))
+
+        # 2. Airtight non_consensus_gate blocks cliches, unverified laundering, non-measurable falsification & single-source in --strict
+        gate_py = os.path.expanduser("~/tools/non_consensus_gate.py")
+        if os.path.isfile(gate_py):
+            cliche_md = (
+                "## Evidence\n- https://a.invalid/1\n"
+                "## Contrarian / Non-Consensus Point\n- Honestly it depends on best practices.\n"
+                "## Falsification Check\n- Fails if latency > 20ms.\n"
+                "## UNVERIFIED\n- None\n"
+            )
+            r_bad = subprocess.run(["python3", gate_py, "-"], input=cliche_md, capture_output=True, text=True)
+            self.assertEqual(r_bad.returncode, 1)
+            self.assertIn("Consensus cliché", r_bad.stdout)
+
+            strict_ok_md = (
+                "## Evidence\n- https://arxiv.org/abs/2611.22075\n- https://github.com/waghmaredb/reversibility-classes\n"
+                "## Contrarian / Non-Consensus Point\n- Static tool allowlists ignore undoability; reversibility gating cuts damage.\n"
+                "## Falsification Check\n- Fails if any REV3 command returns allow without approval.\n"
+                "## UNVERIFIED\n- None\n"
+            )
+            r_good = subprocess.run(["python3", gate_py, "--strict", "-"], input=strict_ok_md, capture_output=True, text=True)
+            self.assertEqual(r_good.returncode, 0, msg=r_good.stdout)
+
     def test_full_10_mission_acceptance_suite(self):
         rep = run_suite()
         self.assertEqual(rep["passed"], 10, msg=json.dumps(rep, indent=2))

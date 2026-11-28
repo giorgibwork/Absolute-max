@@ -14,7 +14,7 @@ import sqlite3
 import time
 from typing import Any
 
-from . import OmegaPaths, ensure_dirs, get_paths
+from . import OmegaPaths, ensure_dirs, get_paths, tune_sqlite
 
 SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build", ".antigem"}
 
@@ -27,8 +27,7 @@ def _connect(paths: OmegaPaths) -> sqlite3.Connection:
     ensure_dirs(paths)
     conn = sqlite3.connect(_db_path(paths), timeout=5.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout=5000;")
+    tune_sqlite(conn)
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS files (

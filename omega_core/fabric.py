@@ -16,7 +16,7 @@ import subprocess
 import time
 from typing import Any, Callable
 
-from . import OmegaPaths, ensure_dirs, get_paths
+from . import OmegaPaths, ensure_dirs, get_paths, tune_sqlite
 
 DEFAULT_CATALOG: list[dict[str, Any]] = [
     {"model_id": "gemini-4-neon-xhigh", "provider_id": "antigravity", "family": "gemini-neon", "roles": ["deep_arch", "max_reasoning", "coding"], "billing_status": "free"},
@@ -116,11 +116,20 @@ def infer_quota_pool(model_id: str) -> str:
     return "gemini_models"
 
 
-def discover_agy_models(timeout_s: int = 12) -> list[dict[str, str]]:
-    """Query `agy models` live ($0.00, zero token burn) and return discovered model IDs + labels."""
+def discover_agy_models(timeout_s: int = 8) -> list[dict[str, str]]:
+    """Query `agy models` live ($0.00, zero token burn) with fast-fail if CLI auth is missing."""
     try:
-        r = subprocess.run(["agy", "models"], capture_output=True, text=True, timeout=timeout_s)
+        r = subprocess.run(
+            ["agy", "models"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
     except Exception:
+        return []
+    combined = (r.stdout or "") + "\n" + (r.stderr or "")
+    if "Authentication required" in combined:
         return []
     out: list[dict[str, str]] = []
     # Strip ANSI/carriage-return spinner artifacts cleanly
@@ -139,8 +148,7 @@ def _connect(paths: OmegaPaths) -> sqlite3.Connection:
     ensure_dirs(paths)
     conn = sqlite3.connect(paths.models_db, timeout=5.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout=5000;")
+    tune_sqlite(conn)
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS model_qualifications (
@@ -206,8 +214,23 @@ def invoke_agy(model_id: str, prompt: str, timeout_s: int = 25) -> dict[str, Any
         prompt,
     ]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s + 8)
+        res = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s + 5,
+        )
         elapsed_ms = round((time.monotonic() - t0) * 1000.0, 1)
+        combined = (res.stdout or "") + "\n" + (res.stderr or "")
+        if "Authentication required" in combined:
+            return {
+                "ok": False,
+                "rc": 401,
+                "latency_ms": elapsed_ms,
+                "text": "",
+                "error": "agy_cli_auth_required: run `agy` interactively once to sign in, or use native AntiGem subagents",
+            }
         lines = [
             ln
             for ln in (res.stdout or "").splitlines()

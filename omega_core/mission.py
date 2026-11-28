@@ -14,7 +14,7 @@ import time
 import uuid
 from typing import Any, Callable
 
-from . import R2_WORKSPACE, OmegaPaths, ensure_dirs, get_paths
+from . import R2_WORKSPACE, OmegaPaths, ensure_dirs, get_paths, tune_sqlite
 
 VALID_MISSION_STATES = (
     "DRAFT",
@@ -43,8 +43,7 @@ def _connect(paths: OmegaPaths) -> sqlite3.Connection:
     ensure_dirs(paths)
     conn = sqlite3.connect(paths.missions_db, timeout=5.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout=5000;")
+    tune_sqlite(conn)
     conn.execute("PRAGMA foreign_keys=ON;")
     conn.executescript(
         """

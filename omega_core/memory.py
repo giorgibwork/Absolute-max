@@ -18,7 +18,7 @@ import time
 import uuid
 from typing import Any
 
-from . import R0_READONLY, R2_WORKSPACE, R3_EXTERNAL_APPROVED, OmegaPaths, ensure_dirs, get_paths
+from . import R0_READONLY, R2_WORKSPACE, R3_EXTERNAL_APPROVED, OmegaPaths, ensure_dirs, get_paths, tune_sqlite
 from .kernel import screen_memory_write
 from .mission import MissionKernel
 
@@ -32,8 +32,7 @@ def connect_vault(paths: OmegaPaths) -> sqlite3.Connection:
     ensure_dirs(paths)
     conn = sqlite3.connect(paths.vault_db, timeout=5.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout=5000;")
+    tune_sqlite(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS memories (

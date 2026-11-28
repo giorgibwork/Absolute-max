@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-VERSION = "6.4.0-apex"
+VERSION = "6.5.0-apex"
 
 # Capability Rings (Weakest-Agent Safety Invariant)
 R0_READONLY = 0
@@ -89,3 +89,13 @@ def ensure_dirs(paths: OmegaPaths) -> None:
         paths.tmpdir,
     ):
         os.makedirs(d, exist_ok=True)
+
+
+def tune_sqlite(conn) -> None:
+    """Apply production low-latency SQLite WAL + 64MB mmap + memory temp_store pragmas."""
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
+    conn.execute("PRAGMA mmap_size=67108864;")
+    conn.execute("PRAGMA cache_size=-8000;")
+    conn.execute("PRAGMA busy_timeout=5000;")

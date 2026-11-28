@@ -16,23 +16,27 @@ import re
 from typing import Any
 
 from . import R2_WORKSPACE, OmegaPaths, ensure_dirs, get_paths
+from .compact_anchor import maybe_post_compact_message
 from .memory import KnowledgeFabric
 
-# Synonym bridge so natural speech ("my phone", "workout", "money") hits exact vault keys via JIT Hydration
+# Synonym bridge so natural speech ("my phone", "backup", "money") hits exact vault keys via JIT Hydration
 JIT_SYNONYMS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\b(?:phone|poco|f6|roblox|touch|fps|hyperos|adb|shizuku|axmanager)\b", re.I), "vermeer"),
+    (re.compile(r"\b(?:phone|poco|f6|roblox|touch|fps|hyperos|adb|ladb|shizuku|axmanager)\b", re.I), "vermeer"),
     (re.compile(r"\b(?:tsb|saitama|claw|dash|combo)\b", re.I), "saitama"),
     (re.compile(r"\b(?:money|bet|odds|kelly|polygon|usdc|cashout|binance|bank|gel)\b", re.I), "polymarket"),
     (re.compile(r"\b(?:bounty|bounties|pr|issue|github\s+earn)\b", re.I), "bounty"),
     (re.compile(r"\b(?:gym|workout|arm|hook|cable|protein|diet|steps|weight)\b", re.I), "armwrestling"),
     (re.compile(r"\b(?:uk|ielts|lydia|travel|marriage)\b", re.I), "active_goals"),
     (re.compile(r"\b(?:mcp|bridge|tunnl|termux)\b", re.I), "tunnl"),
+    (re.compile(r"\b(?:backup|vault|drive|restore|cloud|google\s+pro)\b", re.I), "backup"),
+    (re.compile(r"\b(?:omega|os|harness|kernel|jury|non[- ]?consensus|grok|codegraph)\b", re.I), "repos"),
 ]
 
 JIT_STOP = {"the", "and", "for", "with", "what", "how", "can", "you", "our", "this", "that", "from", "have", "about", "just", "make", "need", "want"}
 
 HANDOFF_RX = re.compile(r"\b(?:handoff|wrap\s+up\s+for\s+new\s+chat|session\s+handoff|prepare\s+new\s+chat)\b", re.IGNORECASE)
 CRAWL_RX = re.compile(r"\b(?:scrape|crawl|bulk\s+crawl|mass\s+scrape|500\+\s+pages|youtube\s+transcript|transcript\s+of)\b", re.IGNORECASE)
+CODEGRAPH_RX = re.compile(r"\b(?:codegraph|call\s+graph|who\s+calls|find\s+callers|where\s+is\s+\w+\s+defined)\b", re.IGNORECASE)
 
 DEEP_RESEARCH_RX = re.compile(
     r"\b(?:deep\s+research|dig\s+deep|full\s+breakdown|investigate\s+deeply|maximize|optimize|absolute\s+ceiling|eye\s+of\s+god|research\s+everything|comprehensive\s+research)\b",
@@ -92,8 +96,8 @@ def classify_user_intent(user_input: str) -> list[dict[str, str]]:
             {
                 "intent": "DEEP_RESEARCH",
                 "directive": (
-                    "[Omega->DEEP Bulk] Run `omega crawl \"<topic>\" --pages 500` FIRST (0 LLM tokens, trafilatura+scrapling->SQLite FTS5), "
-                    "pass non_consensus_gate, reply in plain English. Never dump CLI flags."
+                    "[Omega->DEEP] `omega crawl \"<topic>\" --pages 250` (0 tokens, HTTP/2+trafilatura->FTS5), "
+                    "pass `non_consensus_gate.py --strict`, execute directly, zero lecturing."
                 ),
             }
         )
@@ -102,9 +106,16 @@ def classify_user_intent(user_input: str) -> list[dict[str, str]]:
             {
                 "intent": "FAST_RESEARCH",
                 "directive": (
-                    "[Omega->FAST Bulk] Run `omega crawl \"<topic>\" --pages 250 --bfs 30` (0 LLM tokens, local FTS5) "
-                    "instead of repeated search_web turns. Reply in plain English."
+                    "[Omega->FAST] Prefer `omega crawl \"<topic>\" --query-only` (<5ms FTS5) or `--pages 120` (0 tokens) over repeated search_web."
                 ),
+            }
+        )
+
+    if CODEGRAPH_RX.search(txt):
+        routes.append(
+            {
+                "intent": "CODEGRAPH",
+                "directive": "[Omega->AST] Run `omega code find|callers <sym>` before opening whole files.",
             }
         )
 
@@ -274,9 +285,13 @@ def route_invocation(payload: dict[str, Any], paths: OmegaPaths | None = None) -
         pass
 
     parts: list[str] = []
+    # Lossless post-compact anchor restore (fires ONLY on 1st turn after /compact -> 0 KV-cache hit otherwise)
+    anchor_msg = maybe_post_compact_message(conv_id, p)
+    if anchor_msg:
+        parts.append(anchor_msg)
     routes = classify_user_intent(user_input)
     if routes:
-        parts.append(" ".join(r["directive"] for r in routes))
+        parts.append(" ".join(r["directive"] for r in routes)[:420])
     jit = jit_hydrate_memories(user_input, p)
     if jit:
         parts.append(jit)
