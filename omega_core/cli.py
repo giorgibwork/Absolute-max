@@ -26,9 +26,11 @@ if _REPO not in sys.path:
 from omega_core import R2_WORKSPACE, VERSION, get_paths
 from omega_core.bavar import allocate_verification, verified_calc
 from omega_core.codegraph import CodeGraph
+from omega_core.dag import MissionDAG
 from omega_core.dream import DreamEngine
 from omega_core.evo import EvolutionLab
 from omega_core.fabric import IntelligenceFabric
+from omega_core.forge import SkillForge
 from omega_core.kernel import evaluate_tool_call
 from omega_core.memory import KnowledgeFabric
 from omega_core.mission import MissionKernel
@@ -267,6 +269,38 @@ def cmd_handoff(args) -> None:
     _jprint(generate_handoff(note=args.note))
 
 
+def cmd_dag(args) -> None:
+    dag = MissionDAG(args.mission_id)
+    if args.action == "add":
+        _jprint(dag.add_task(args.task_id, args.title, depends_on=args.depends_on or []))
+    elif args.action == "list":
+        _jprint(dag.list_tasks())
+    elif args.action == "validate":
+        _jprint({"ok": True, "topo_order": dag.validate_acyclic(), "ready": [t["task_id"] for t in dag.ready_tasks()]})
+
+
+def cmd_forge(args) -> None:
+    sf = SkillForge()
+    if args.action == "admit":
+        _jprint(
+            sf.admit_skill(
+                args.skill_id,
+                args.trigger,
+                args.procedure,
+                expected_outcome=args.expected,
+                task_family=args.family,
+                evidence_ref=args.evidence_ref,
+                verification_passed=args.verified,
+            )
+        )
+    elif args.action == "match":
+        _jprint(sf.match_skills(args.query, task_family=args.family, limit=args.limit))
+    elif args.action == "outcome":
+        _jprint(sf.record_outcome(args.skill_id, success=(args.result == "pos")))
+    elif args.action == "prune":
+        _jprint(sf.prune_dead_skills())
+
+
 def cmd_rtk(args) -> None:
     cmd = list(args.command or [])
     if cmd and cmd[0] == "--":
@@ -350,7 +384,8 @@ def cmd_dashboard(args) -> None:
         print(f"  * {a['approval_id']} [{a['action_class']}] {a['summary'][:70]}")
     base_models = fab.list_base_models()
     q_base = [m for m in base_models if m["qualification_state"] == "QUALIFIED"]
-    print(f"- Base Models: {len(q_base)}/{len(base_models)} QUALIFIED ({len(models)} effort-tier endpoints across 3 quota pools)")
+    pools = {b["quota_pool"] for b in base_models}
+    print(f"- Base Models: {len(q_base)}/{len(base_models)} QUALIFIED ({len(models)} effort-tier endpoints across {len(pools)} Gemini quota pools)")
     for bm in base_models:
         lat = f"{bm['best_latency_ms']:.0f}ms" if bm["best_latency_ms"] else "untested"
         tiers = ",".join(bm["effort_tiers"])
@@ -581,6 +616,41 @@ def build_parser() -> argparse.ArgumentParser:
     prtk.add_argument("--timeout", type=int, default=30)
     prtk.add_argument("command", nargs=argparse.REMAINDER)
     prtk.set_defaults(func=cmd_rtk)
+
+    # dag (Cognitive Runtime parallel task-graph scheduler)
+    pdag = sub.add_parser("dag", help="Manage crash-resumable Mission Task DAGs (OAPX-SYS-05)")
+    pdag_sub = pdag.add_subparsers(dest="action", required=True)
+    pdag_add = pdag_sub.add_parser("add")
+    pdag_add.add_argument("mission_id")
+    pdag_add.add_argument("task_id")
+    pdag_add.add_argument("title")
+    pdag_add.add_argument("--depends-on", action="append")
+    pdag_ls = pdag_sub.add_parser("list")
+    pdag_ls.add_argument("mission_id")
+    pdag_val = pdag_sub.add_parser("validate")
+    pdag_val.add_argument("mission_id")
+    pdag.set_defaults(func=cmd_dag)
+
+    # forge (Verified procedural Skill Forge + Skill Deletion)
+    pfg = sub.add_parser("forge", help="ANCHOR-gated executable Skill Forge (Doctrine §30)")
+    pfg_sub = pfg.add_subparsers(dest="action", required=True)
+    pfg_adm = pfg_sub.add_parser("admit")
+    pfg_adm.add_argument("skill_id")
+    pfg_adm.add_argument("--trigger", required=True)
+    pfg_adm.add_argument("--procedure", required=True)
+    pfg_adm.add_argument("--expected", default="")
+    pfg_adm.add_argument("--family", default="general")
+    pfg_adm.add_argument("--evidence-ref", default="")
+    pfg_adm.add_argument("--verified", action="store_true")
+    pfg_m = pfg_sub.add_parser("match")
+    pfg_m.add_argument("query")
+    pfg_m.add_argument("--family", default=None)
+    pfg_m.add_argument("--limit", type=int, default=5)
+    pfg_out = pfg_sub.add_parser("outcome")
+    pfg_out.add_argument("skill_id")
+    pfg_out.add_argument("--result", choices=["pos", "neg"], required=True)
+    pfg_sub.add_parser("prune")
+    pfg.set_defaults(func=cmd_forge)
 
     # suite
     psu = sub.add_parser("suite", help="Run 10-Mission Integrated Acceptance Suite (A-J)")

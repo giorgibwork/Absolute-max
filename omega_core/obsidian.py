@@ -3,7 +3,7 @@
 Projects the entire OMEGA APEX / Absolute Max OS into ONE massive, zero-orphan,
 8-color neon Knowledge Graph (no separate Canvas files, no 10-folder sprawl):
 - Root hub: OMEGA-APEX.md
-- Nodes/: All 13 OS Subsystems, Core Modules, 9 Base Models & 3 Quota Pools,
+- Nodes/: All 13 OS Subsystems, Core Modules, Pure Gemini + Antigravity Base Models & Quota Pools,
   all active omega_vault.db Memories, Verified Evidence, Active Missions,
   Concept Bridges, and Top Curated Chinese/GitHub/Trading/Strategy Corpus Nodes
 - Inbox/: The single drop folder for user notes/rules (two-way ingested into SQLite)
@@ -370,7 +370,7 @@ class ObsidianSync:
                 + f"\n{m['text']}\n",
             )
 
-        # 4. All 9 Base Models + 3 Quota Pools (Emerald Constellation)
+        # 4. Pure Gemini + Antigravity Base Models + Quota Pools (Emerald Constellation)
         base_models = self.fab.list_base_models()
         pools: dict[str, list[str]] = {}
         for bm in base_models:
@@ -568,8 +568,9 @@ class ObsidianSync:
                 hubs[rhub][1].append(rname)
                 write_node(rname, rtag, f"# Report: {base}\n\n- **Hub:** [[{rhub}]] · [[OMEGA-APEX]]\n\n{rtxt}\n")
 
-            # 7f. Curated High-Signal Local Corpus Clusters (160 docs across 4 SQLite corpora, 0 pts=0 noise)
+            # 7f. Curated High-Signal Local Corpus Clusters (SQLite FTS5 corpora, 0 pts=0 noise)
             corpora = [
+                ("omega_corpus.db", "Cluster-Omega-Omni-Corpus", "Hub-Research-Alpha", "research", 45),
                 ("cn_vermeer_corpus.db", "Cluster-CN-Vermeer-GitHub", "Hub-POCO-Vermeer", "vermeer", 45),
                 ("trading_research_corpus.db", "Cluster-Trading-Alpha", "Hub-Finance-Markets", "finance", 40),
                 ("strategy_research_corpus.db", "Cluster-Quant-Strategy", "Hub-Finance-Markets", "finance", 40),
@@ -681,7 +682,7 @@ class ObsidianSync:
             f"# OMEGA APEX / Absolute Max OS ({VERSION})\n\n"
             "## Constellation Hubs\n"
             "- [[Hub-OMEGA-OS]] (Cyan) — 13 Subsystems & Core Engine\n"
-            "- [[Hub-Models-Workforce]] (Emerald) — 9 Qualified Base Models & 3 Quota Pools\n"
+            f"- [[Hub-Models-Workforce]] (Emerald) — {len(base_models)} Qualified Gemini Base Models & {len(pools)} Gemini Quota Pools\n"
             "- [[Hub-Research-Alpha]] (Gold) — Tri-Lingual Chinese + GitHub Research & Evidence\n"
             "- [[Hub-POCO-Vermeer]] (Violet) — POCO F6 Pro (`vermeer`) + Chinese GitHub Corpus + TSB\n"
             "- [[Hub-Finance-Markets]] (Blue) — Polymarket, Quant Strategy & GitHub Bounties\n"

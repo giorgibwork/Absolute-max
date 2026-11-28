@@ -120,15 +120,19 @@ class OmegaCoreTests(unittest.TestCase):
         fab = IntelligenceFabric(self.paths)
         variants = fab.list_models()
         bases = fab.list_base_models()
-        self.assertEqual(len(variants), 23)
-        self.assertEqual(len(bases), 9)
+        self.assertEqual(len(variants), 16)
+        self.assertEqual(len(bases), 6)
         pools = {b["quota_pool"] for b in bases}
-        self.assertEqual(pools, {"gemini_models", "claude_gpt", "gemini_argon"})
+        self.assertEqual(pools, {"gemini_models", "gemini_argon"})
+        # Strict Gemini + Antigravity only invariant: zero third-party models in router/catalog
+        for m in variants:
+            self.assertNotIn("claude", m["model_id"].lower())
+            self.assertNotIn("gpt", m["model_id"].lower())
 
     def test_research_part_v_cache_dedup_and_date_sensitivity(self):
         from omega_core.research import ResearchEngine, is_date_sensitive
 
-        self.assertTrue(is_date_sensitive("What is the newest Claude model in 2026?"))
+        self.assertTrue(is_date_sensitive("What is the newest Gemini model in 2026?"))
         self.assertFalse(is_date_sensitive("How does SQLite WAL journaling work?"))
 
         kf = KnowledgeFabric(self.paths)
@@ -158,7 +162,7 @@ class OmegaCoreTests(unittest.TestCase):
     def test_natural_language_auto_router_and_dedup(self):
         from omega_core.router import classify_user_intent, route_invocation
 
-        r_fast = classify_user_intent("check online what the newest Claude model is right now")
+        r_fast = classify_user_intent("check online what the newest Gemini model is right now")
         self.assertEqual([r["intent"] for r in r_fast], ["FAST_RESEARCH"])
 
         r_deep = classify_user_intent("do deep research and maximize my battery life")
@@ -207,8 +211,8 @@ class OmegaCoreTests(unittest.TestCase):
         )
         self.assertTrue(jres["ok"])
         self.assertEqual(jres["builder_model"], "gemini-4-neon-xhigh")
-        self.assertEqual(jres["prosecutor_model"], "claude-sonnet-5-5-medium")
-        self.assertEqual(jres["judge_model"], "gpt-oss-120b-medium")
+        self.assertEqual(jres["prosecutor_model"], "gemini-4-argon-high")
+        self.assertEqual(jres["judge_model"], "gemini-4-hydrogen-xhigh")
 
         # Obsidian vault creation + 2-way inbox ingest + valid 10-color single-galaxy graph.json
         vdir = os.path.join(self.tmpdir, "TestOmegaVault")
@@ -412,6 +416,57 @@ class OmegaCoreTests(unittest.TestCase):
             )
             r_good = subprocess.run(["python3", gate_py, "--strict", "-"], input=strict_ok_md, capture_output=True, text=True)
             self.assertEqual(r_good.returncode, 0, msg=r_good.stdout)
+
+    def test_v70_pure_gemini_dag_skill_forge_and_source_authority(self):
+        from omega_core.dag import MissionDAG
+        from omega_core.dream import DreamEngine
+        from omega_core.forge import SkillForge
+        from omega_core.omni import score_source_authority
+
+        # 1. MissionDAG topological parallel wave execution + cycle rejection
+        dag = MissionDAG("M-DAG-TEST", self.paths)
+        dag.add_task("t1", "Fetch evidence")
+        dag.add_task("t2", "Analyze repo")
+        dag.add_task("t3", "Synthesize", depends_on=["t1", "t2"])
+        res = dag.execute_parallel(lambda node, deps: {"ok": True, "ran": node["task_id"], "deps": sorted(deps.keys())})
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["waves"], 2)
+        self.assertEqual(res["completed"], 3)
+
+        cyc = MissionDAG("M-CYCLE-TEST", self.paths)
+        cyc.add_task("a", "A", depends_on=["b"])
+        cyc.add_task("b", "B", depends_on=["a"])
+        with self.assertRaises(ValueError):
+            cyc.validate_acyclic()
+
+        # 2. SkillForge ANCHOR admission gate + FTS5 match + Skill Deletion
+        sf = SkillForge(self.paths)
+        rej = sf.admit_skill("sk/unverified", "build app", "do stuff", verification_passed=False)
+        self.assertEqual(rej["status"], "REJECTED_UNVERIFIED")
+
+        ok_sk = sf.admit_skill(
+            "sk/sqlite_tune",
+            "optimize sqlite fts5 latency",
+            "Apply WAL + 64MB mmap + memory temp_store",
+            expected_outcome="FTS5 <5ms",
+            task_family="coding",
+            verification_passed=True,
+        )
+        self.assertEqual(ok_sk["status"], "ADMITTED")
+        hits = sf.match_skills("sqlite fts5", task_family="coding")
+        self.assertEqual(hits[0]["skill_id"], "sk/sqlite_tune")
+
+        sf.admit_skill("sk/bad_skill", "bad advice", "break everything", task_family="coding", verification_passed=True)
+        for _ in range(4):
+            sf.record_outcome("sk/bad_skill", success=False)
+        dr = DreamEngine(self.paths).run_dream(sync_obsidian=False, index_code=False)
+        self.assertIn("sk/bad_skill", dr["pruned_skills"]["deleted_skills"])
+
+        # 3. Doctrine §19 Source Authority Hierarchy
+        self.assertGreater(
+            score_source_authority("https://arxiv.org/abs/2611.22075"),
+            score_source_authority("https://medium.com/random-blog"),
+        )
 
     def test_full_10_mission_acceptance_suite(self):
         rep = run_suite()

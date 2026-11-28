@@ -7,7 +7,7 @@ Implements Doctrine Part V + Giorgi's Non-Consensus & Chinese-for-Everything sta
   3. Academic & Technical Papers Lane: arXiv + OpenAlex (250M+ works, citation-sorted) + Semantic Scholar / Europe PMC + StackExchange
   4. Practitioner & Hostile Failure Lane: HN Stories (points >= 5 — zero pts=0 spam!) + HN Comments + Failure/Regression query expansion + DDG Instant
 - Date-sensitivity guard + Section 20 Anti-Loop verification cache
-- Optional 3-Family Asymmetric Jury (Neon XHigh + Claude Sonnet/Opus + GPT-OSS 120B)
+- Optional Pure Gemini Cross-Pool Parallel Asymmetric Jury (Neon XHigh + Argon High + Hydrogen XHigh)
 - Optional auto-export of verified Research Dossiers to Obsidian (/sdcard/Documents/OmegaVault)
 """
 from __future__ import annotations
@@ -545,47 +545,57 @@ class ResearchEngine:
             else:
                 urls_to_fetch.append(u)
 
-        # Step 7: Selective full-text fetch via ~/tools/web_gather.py
-        web_gather = os.path.join(self.tools_dir, "web_gather.py")
+        # Step 7: In-process pooled HTTP/2 + trafilatura full-text fetch (zero subprocess overhead)
         fetched_ok = 0
-        if not offline and urls_to_fetch and os.path.exists(web_gather):
-            try:
-                r = subprocess.run(
-                    ["python3", web_gather, *urls_to_fetch[:10], "--max-chars", "2200", "--timeout", "8"],
-                    capture_output=True,
-                    text=True,
-                    timeout=min(30, cfg["timeout_s"]),
-                )
-                if r.returncode == 0 and r.stdout.strip():
-                    if t_first is None:
-                        t_first = round((time.monotonic() - t0) * 1000.0, 1)
-                    try:
-                        pages = json.loads(r.stdout)
-                    except json.JSONDecodeError:
-                        pages = []
-                    for pg in pages:
-                        if pg.get("status", 0) == 200 and pg.get("text"):
-                            fetched_ok += 1
-                            ev = self.kf.record_evidence(
-                                claim_text=f"Primary page [{pg.get('title', '')[:80]}] for: {question[:100]}",
-                                source_id="web_gather",
-                                locator=pg["url"],
-                                content_sample=pg["text"][:3000],
-                                mission_id=mission_id,
-                                source_type="primary",
-                                retrieval_scope="full_text",
-                                support_type="supports",
-                                verification_method="live_http_fetch",
-                                verification_status="verified",
-                            )
-                            evidence_ids.append(ev["evidence_id"])
-                            positive_snippets.append(f"[primary:{pg['url']}] {pg['text'][:1000]}")
-                        elif pg.get("error"):
-                            errors.append(f"fetch:{pg.get('url','')[:60]}:{pg['error']}")
-            except subprocess.TimeoutExpired:
-                errors.append(f"web_gather_timeout_{cfg['timeout_s']}s")
+        if not offline and urls_to_fetch:
+            from .omni import UA as OMNI_UA, fetch_public_page
 
-        # Step 12: Optional True 3-Family Asymmetric Jury (Neon XHigh + Claude + GPT-OSS)
+            targets = urls_to_fetch[:10]
+            shared_cli = None
+            try:
+                import httpx  # type: ignore
+
+                shared_cli = httpx.Client(
+                    http2=True,
+                    follow_redirects=True,
+                    timeout=8,
+                    headers={"User-Agent": OMNI_UA},
+                    limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
+                )
+            except Exception:
+                shared_cli = None
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(targets))) as ex:
+                    pages = list(ex.map(lambda u: fetch_public_page(u, timeout=8, client=shared_cli), targets))
+                if pages and t_first is None:
+                    t_first = round((time.monotonic() - t0) * 1000.0, 1)
+                for pg in pages:
+                    if pg.get("ok") and pg.get("text"):
+                        fetched_ok += 1
+                        ev = self.kf.record_evidence(
+                            claim_text=f"Primary page [{pg.get('title', '')[:80]}] for: {question[:100]}",
+                            source_id=f"omni:{pg.get('engine', 'http')}",
+                            locator=pg["url"],
+                            content_sample=pg["text"][:3000],
+                            mission_id=mission_id,
+                            source_type="primary",
+                            retrieval_scope="full_text",
+                            support_type="supports",
+                            verification_method="live_http_fetch",
+                            verification_status="verified",
+                        )
+                        evidence_ids.append(ev["evidence_id"])
+                        positive_snippets.append(f"[primary:{pg['url']}] {pg['text'][:1000]}")
+                    elif pg.get("error"):
+                        errors.append(f"fetch:{pg.get('url','')[:60]}:{pg['error']}")
+            finally:
+                if shared_cli is not None:
+                    try:
+                        shared_cli.close()
+                    except Exception:
+                        pass
+
+        # Step 12: Optional Pure Gemini Cross-Pool Parallel Asymmetric Jury
         do_jury = cfg["use_jury"] if challenge is None else bool(challenge)
         jury_out: dict[str, Any] = {}
         if not offline and do_jury and (positive_snippets or hostile_snippets):

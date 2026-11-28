@@ -163,13 +163,13 @@ def run_suite(*, write_baseline_path: str | None = None) -> dict[str, Any]:
         ok = len(conflicts) == 1 and conflicts[0]["supports_count"] == 1 and conflicts[0]["refutes_count"] == 1
         return {"ok": ok, "evidence_ids": [e1["evidence_id"], e2["evidence_id"]], "conflicts_surfaced": len(conflicts)}
 
-    # Mission E: Multi-model qualification & automatic cross-family fallback
+    # Mission E: Pure Gemini qualification & automatic cross-pool fallback
     def m_e():
         calls = []
 
         def fake_invoker(model_id: str, prompt: str, timeout_s: int):
             calls.append(model_id)
-            if "claude" in model_id:
+            if "argon" in model_id and "audit" in prompt:
                 return {"ok": False, "rc": 1, "latency_ms": 12.0, "text": "", "error": "simulated_503"}
             return {
                 "ok": True,
@@ -180,14 +180,16 @@ def run_suite(*, write_baseline_path: str | None = None) -> dict[str, Any]:
             }
 
         fab = IntelligenceFabric(spaths, invoker=fake_invoker)
-        q_gem = fab.qualify_model("gemini-4-neon-high")
-        # security_audit prefers claude-opus-5-5-medium first -> fails -> falls back to gemini-4-neon-high
+        q_arg = fab.qualify_model("gemini-4-argon-high")
+        q_gem = fab.qualify_model("gemini-4-neon-xhigh")
+        # security_audit prefers gemini-4-argon-high first -> fails 503 -> spills over across pool to gemini-4-neon-xhigh
         res = fab.execute_with_fallback("run hostile security audit", "audit this diff")
         ok = (
-            q_gem["qualification_state"] == "QUALIFIED"
+            q_arg["qualification_state"] == "QUALIFIED"
+            and q_gem["qualification_state"] == "QUALIFIED"
             and res["ok"]
-            and res["model_used"] == "gemini-4-neon-high"
-            and len(res["attempts"]) >= 1
+            and res["model_used"] == "gemini-4-neon-xhigh"
+            and len(res["attempts"]) == 2
         )
         return {"ok": ok, "qualified": q_gem["qualification_state"], "model_used": res["model_used"], "calls": calls}
 

@@ -17,6 +17,7 @@ from typing import Any
 
 from . import R2_WORKSPACE, OmegaPaths, ensure_dirs, get_paths
 from .compact_anchor import maybe_post_compact_message
+from .forge import SkillForge
 from .memory import KnowledgeFabric
 
 # Synonym bridge so natural speech ("my phone", "backup", "money") hits exact vault keys via JIT Hydration
@@ -236,20 +237,40 @@ def jit_hydrate_memories(user_input: str, paths: OmegaPaths, max_chars: int = 90
         kf = KnowledgeFabric(paths)
         hits = kf.graph_search(query, caller_ring=R2_WORKSPACE, hops=1, limit=3)
     except Exception:
-        return ""
-    if not hits:
+        hits = []
+    try:
+        skills = SkillForge(paths).match_skills(query, limit=2)
+    except Exception:
+        skills = []
+    if not hits and not skills:
         return ""
 
-    lines = ["<jit_hydrated_context>"]
-    used = len(lines[0]) + len("</jit_hydrated_context>") + 2
-    for h in hits:
-        entry = f"- [{h['key']}|h{h.get('match_hop', 0)}] {h['text'].replace(chr(10), ' ')[:270]}"
-        if used + len(entry) + 1 > max_chars:
-            break
-        lines.append(entry)
-        used += len(entry) + 1
-    lines.append("</jit_hydrated_context>")
-    return "\n".join(lines) if len(lines) > 2 else ""
+    blocks: list[str] = []
+    if hits:
+        lines = ["<jit_hydrated_context>"]
+        used = len(lines[0]) + len("</jit_hydrated_context>") + 2
+        for h in hits:
+            entry = f"- [{h['key']}|h{h.get('match_hop', 0)}] {h['text'].replace(chr(10), ' ')[:270]}"
+            if used + len(entry) + 1 > max_chars:
+                break
+            lines.append(entry)
+            used += len(entry) + 1
+        lines.append("</jit_hydrated_context>")
+        if len(lines) > 2:
+            blocks.append("\n".join(lines))
+    if skills:
+        slines = ["<jit_forged_skills>"]
+        sused = len(slines[0]) + len("</jit_forged_skills>") + 2
+        for s in skills:
+            entry = f"- [{s['skill_id']}|u={s['utility_score']:.2f}] {s['procedure'].replace(chr(10), ' ')[:140]}"
+            if sused + len(entry) + 1 > 340:
+                break
+            slines.append(entry)
+            sused += len(entry) + 1
+        slines.append("</jit_forged_skills>")
+        if len(slines) > 2:
+            blocks.append("\n".join(slines))
+    return "\n".join(blocks)
 
 
 def route_invocation(payload: dict[str, Any], paths: OmegaPaths | None = None) -> dict[str, Any]:

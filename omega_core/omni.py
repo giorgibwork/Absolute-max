@@ -368,8 +368,32 @@ def _corpus_conn(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+TIER1_DOMAINS = (
+    "arxiv.org", "github.com", "aclanthology.org", "openreview.net", "neurips.cc",
+    "icml.cc", "iclr.cc", "sqlite.org", "docs.python.org", "developer.android.com",
+    "antigravity.google", "research.google", "microsoft.com/en-us/research", "proceedings.mlr.press",
+)
+TIER2_DOMAINS = ("news.ycombinator.com", "openalex.org", "huggingface.co", "ietf.org", "rfc-editor.org")
+LOW_SIGNAL_DOMAINS = ("medium.com", "dev.to", "geeksforgeeks.org", "w3schools.com", "quora.com")
+
+
+def score_source_authority(url: str, source: str = "") -> float:
+    """Doctrine Part V §19 deterministic source quality hierarchy (1.0=primary paper/code -> 0.3=low-signal)."""
+    u = (url or "").lower()
+    s = (source or "").lower()
+    if any(d in u for d in TIER1_DOMAINS) or s.startswith(("arxiv", "github_repo", "github_issue")):
+        return 1.0
+    if any(d in u for d in TIER2_DOMAINS) or s.startswith(("hn_", "openalex")):
+        return 0.85
+    if "wikipedia.org" in u or "stackoverflow.com" in u or s.startswith("wikipedia"):
+        return 0.70
+    if any(d in u for d in LOW_SIGNAL_DOMAINS):
+        return 0.35
+    return 0.60
+
+
 def _bm25_top_hits(conn: sqlite3.Connection, anchor: str, top_k: int) -> list[tuple]:
-    """AND-first BM25 FTS5 retrieval (high precision) with graceful OR fallback."""
+    """AND-first BM25 FTS5 retrieval re-ranked by Doctrine §19 Source Authority."""
     tokens = list(dict.fromkeys(re.findall(r"[A-Za-z0-9_]{3,}", anchor)))
     if not tokens:
         return conn.execute(
@@ -378,15 +402,13 @@ def _bm25_top_hits(conn: sqlite3.Connection, anchor: str, top_k: int) -> list[tu
         ).fetchall()
 
     seen: set[str] = set()
-    hits: list[tuple] = []
+    raw_hits: list[tuple[float, tuple]] = []
     queries = []
     if len(tokens) >= 2:
-        queries.append(" AND ".join(tokens[:3]))
-    queries.append(" OR ".join(tokens[:5]))
+        queries.append((" AND ".join(tokens[:3]), 1.35))
+    queries.append((" OR ".join(tokens[:5]), 1.0))
 
-    for q in queries:
-        if len(hits) >= top_k:
-            break
+    for q, boost in queries:
         try:
             batch = conn.execute(
                 """
@@ -395,23 +417,24 @@ def _bm25_top_hits(conn: sqlite3.Connection, anchor: str, top_k: int) -> list[tu
                 WHERE docs_fts MATCH ?
                 ORDER BY bm25(docs_fts) LIMIT ?
                 """,
-                (q, top_k * 2),
+                (q, top_k * 3),
             ).fetchall()
-            for r in batch:
+            for rank, r in enumerate(batch, 1):
                 if r[0] not in seen:
                     seen.add(r[0])
-                    hits.append(r)
-                    if len(hits) >= top_k:
-                        break
+                    auth = score_source_authority(r[0], r[1])
+                    score = (boost / (10.0 + rank)) * auth
+                    raw_hits.append((score, r))
         except sqlite3.OperationalError:
             continue
 
-    if not hits:
-        hits = conn.execute(
+    if not raw_hits:
+        return conn.execute(
             "SELECT url, source, title, published, substr(text, 1, 180) FROM docs ORDER BY fetched_at DESC LIMIT ?",
             (top_k,),
         ).fetchall()
-    return hits[:top_k]
+    raw_hits.sort(key=lambda x: x[0], reverse=True)
+    return [r for _, r in raw_hits[:top_k]]
 
 
 def query_local_corpus(topic: str, *, db_path: str | None = None, top_k: int = 8) -> dict[str, Any]:

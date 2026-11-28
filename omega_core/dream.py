@@ -21,6 +21,7 @@ from typing import Any
 
 from . import OmegaPaths, ensure_dirs, get_paths
 from .codegraph import CodeGraph
+from .forge import SkillForge
 from .memory import KnowledgeFabric, connect_vault
 from .obsidian import DEFAULT_VAULT_DIR, ObsidianSync
 
@@ -161,7 +162,15 @@ class DreamEngine:
         t0 = time.monotonic()
         failures = self.cluster_failures()
         pruned = self.prune_low_utility_memories()
+        pruned_skills = SkillForge(self.paths).prune_dead_skills()
         edges = self.rebuild_memory_edges()
+
+        # Keep SQLite query planner statistics sharp across vault & evolution DBs
+        for db_conn in (connect_vault(self.paths), _connect_evo(self.paths)):
+            try:
+                db_conn.execute("PRAGMA optimize;")
+            finally:
+                db_conn.close()
 
         code_stats: dict[str, Any] = {}
         if index_code:
@@ -176,11 +185,16 @@ class DreamEngine:
             obs_stats = ObsidianSync(vault_dir=vault_dir, paths=self.paths).sync_all(force_config=False)
 
         kf = KnowledgeFabric(self.paths)
-        kf.append_grepmem("DREAM_CONSOLIDATION", {"failures": failures, "pruned": pruned, "edges": edges}, task_family="runtime")
+        kf.append_grepmem(
+            "DREAM_CONSOLIDATION",
+            {"failures": failures, "pruned": pruned, "pruned_skills": pruned_skills, "edges": edges},
+            task_family="runtime",
+        )
         return {
             "ok": True,
             "failures": failures,
             "pruned": pruned,
+            "pruned_skills": pruned_skills,
             "memory_edges": edges,
             "codegraph": code_stats,
             "obsidian": {"nodes_written": obs_stats.get("nodes_written", 0)} if obs_stats else {},
