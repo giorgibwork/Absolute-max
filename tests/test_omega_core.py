@@ -314,6 +314,75 @@ class OmegaCoreTests(unittest.TestCase):
         self.assertLessEqual(ho["chars"], 750)
         self.assertTrue(os.path.exists(ho["handoff_path"]))
 
+    def test_v64_reversibility_leto_utility_skill_deletion_mirror_collapse_and_folding(self):
+        from omega_core import REV3_HARD_TO_RECOVER, REV4_IRREVERSIBLE
+        from omega_core.dream import DreamEngine
+        from omega_core.evo import EvolutionLab
+        from omega_core.omni import collapse_syndicated_mirrors
+
+        # 1. Five-level Reversibility Classes + Android uid 2000 system-tweak guard
+        d_adb = evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": "rish -c 'settings put global anim_scale 0'"}}},
+            paths=self.paths,
+        )
+        self.assertEqual(d_adb.decision, "ask")
+        self.assertEqual(d_adb.reversibility_class, REV3_HARD_TO_RECOVER)
+
+        d_rm = evaluate_tool_call(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": "rm -rf ~"}}},
+            paths=self.paths,
+        )
+        self.assertEqual(d_rm.decision, "deny")
+        self.assertEqual(d_rm.reversibility_class, REV4_IRREVERSIBLE)
+
+        # 2. Leto Utility Memory + Skill Deletion in DreamEngine
+        kf = KnowledgeFabric(self.paths)
+        kf.add_memory("coding/good_rule", "Always benchmark harness edits in isolated lab", task_family="coding", tags="harness")
+        kf.add_memory("coding/bad_rule", "Always benchmark harness edits directly in prod", task_family="coding", tags="harness")
+        kf.record_memory_feedback("coding/good_rule", positive=True, note="won benchmark")
+        kf.record_memory_feedback("coding/good_rule", positive=True, note="won again")
+        for _ in range(3):
+            kf.record_memory_feedback("coding/bad_rule", positive=False, note="caused regression")
+
+        hits = kf.search_memory("benchmark harness", task_family="coding")
+        hit_keys = [h["key"] for h in hits]
+        self.assertIn("coding/good_rule", hit_keys)
+        self.assertNotIn("coding/bad_rule", hit_keys)
+
+        de = DreamEngine(self.paths)
+        dr = de.run_dream(sync_obsidian=False, index_code=False)
+        self.assertIn("coding/bad_rule", dr["pruned"]["pruned_keys"])
+
+        # 3. Epistemic Guard Syndicated Mirror Collapse
+        rows = [
+            {"url": "https://arxiv.org/abs/2610.18813", "source": "arxiv", "title": "Paper", "text": "Harness self evolution revises software scaffolding including prompts memory workflows and executable components while keeping weights fixed"},
+            {"url": "https://arxiv.org/html/2610.18813v1", "source": "full", "title": "Paper HTML", "text": "Harness self evolution revises software scaffolding including prompts memory workflows and executable components while keeping weights fixed longer text"},
+            {"url": "https://mirror.example.org/repost", "source": "ddg", "title": "Mirror", "text": "Harness self evolution revises software scaffolding including prompts memory workflows and executable components while keeping weights fixed"},
+        ]
+        kept, collapsed = collapse_syndicated_mirrors(rows)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(collapsed, 2)
+
+        # 4. Context Folding unfoldable experiment digests
+        lab = EvolutionLab(self.paths)
+        target = os.path.join(self.tmpdir, "mod.py")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("x = 1\n")
+        e = lab.run_candidate(
+            module="context_mgmt",
+            target_file=target,
+            candidate_content="x = 2\n",
+            rationale="Test fold",
+            predicted_delta=0.1,
+            baseline_score=0.8,
+            evaluator=lambda p: {"score": 0.9, "passed_all": True},
+        )
+        digests = lab.folded_digests(limit=5)
+        self.assertEqual(len(digests), 1)
+        self.assertIn(e["exp_id"], digests[0])
+        unfolded = lab.unfold_experiment(e["exp_id"])
+        self.assertEqual(unfolded["rationale"], "Test fold")
+
     def test_full_10_mission_acceptance_suite(self):
         rep = run_suite()
         self.assertEqual(rep["passed"], 10, msg=json.dumps(rep, indent=2))

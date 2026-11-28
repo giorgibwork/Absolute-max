@@ -172,6 +172,8 @@ def cmd_mem(args) -> None:
         )
     elif args.action == "link":
         _jprint(kf.link_memories(args.src, args.rel, args.dst, weight=args.weight))
+    elif args.action == "feedback":
+        _jprint(kf.record_memory_feedback(args.key, positive=(args.outcome == "pos"), note=args.note))
 
 
 def cmd_models(args) -> None:
@@ -457,6 +459,10 @@ def build_parser() -> argparse.ArgumentParser:
     pk_lk.add_argument("rel")
     pk_lk.add_argument("dst")
     pk_lk.add_argument("--weight", type=float, default=1.0)
+    pk_fb = pk_sub.add_parser("feedback")
+    pk_fb.add_argument("key")
+    pk_fb.add_argument("--outcome", choices=["pos", "neg"], required=True)
+    pk_fb.add_argument("--note", default="")
     pk.set_defaults(func=cmd_mem)
 
     # models

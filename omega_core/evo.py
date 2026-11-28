@@ -253,3 +253,23 @@ class EvolutionLab:
             return [dict(r) for r in rows]
         finally:
             conn.close()
+
+    def folded_digests(self, limit: int = 20) -> list[str]:
+        """Context Folding (arXiv:2611.28244): 1-line compact attempt catalog with lossless on-demand unfold."""
+        exps = self.list_experiments(limit=limit)
+        out: list[str] = []
+        for e in exps:
+            out.append(
+                f"[{e['exp_id']}] {e['module']} | {e['decision']} | delta={e['observed_delta']:+.4f} "
+                f"| lines={e['actual_edit_lines']}/{e['edit_budget_lines']} | {str(e['reason'])[:90]}"
+            )
+        return out
+
+    def unfold_experiment(self, exp_id: str) -> dict[str, Any] | None:
+        """Unfold a single folded experiment digest back to its full lossless record."""
+        conn = _connect(self.paths)
+        try:
+            row = conn.execute("SELECT * FROM sim_experiments WHERE exp_id = ?", (exp_id.strip(),)).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()

@@ -59,6 +59,11 @@ def connect_vault(paths: OmegaPaths) -> sqlite3.Connection:
         ("task_family", "ALTER TABLE memories ADD COLUMN task_family TEXT NOT NULL DEFAULT 'global';"),
         ("capability_ring", "ALTER TABLE memories ADD COLUMN capability_ring INTEGER NOT NULL DEFAULT 2;"),
         ("origin_uri", "ALTER TABLE memories ADD COLUMN origin_uri TEXT NOT NULL DEFAULT 'local://vault';"),
+        ("utility_score", "ALTER TABLE memories ADD COLUMN utility_score REAL NOT NULL DEFAULT 0.5;"),
+        ("positive_hits", "ALTER TABLE memories ADD COLUMN positive_hits INTEGER NOT NULL DEFAULT 0;"),
+        ("negative_hits", "ALTER TABLE memories ADD COLUMN negative_hits INTEGER NOT NULL DEFAULT 0;"),
+        ("serve_count", "ALTER TABLE memories ADD COLUMN serve_count INTEGER NOT NULL DEFAULT 0;"),
+        ("last_served_at", "ALTER TABLE memories ADD COLUMN last_served_at INTEGER NOT NULL DEFAULT 0;"),
     ]
     for col, ddl in migrations:
         if col not in cols:
@@ -204,6 +209,48 @@ class KnowledgeFabric:
         finally:
             conn.close()
 
+    def record_memory_feedback(self, key: str, *, positive: bool, note: str = "") -> dict[str, Any]:
+        """Leto/AdMem utility loop (arXiv:2611.33005 / 2611.20605): binary credit updates future retrieval utility."""
+        k = key.strip()
+        now = int(time.time())
+        conn = connect_vault(self.paths)
+        try:
+            row = conn.execute(
+                "SELECT positive_hits, negative_hits, serve_count FROM memories WHERE key = ?",
+                (k,),
+            ).fetchone()
+            if not row:
+                return {"status": "NOT_FOUND", "key": k}
+            pos = int(row["positive_hits"] or 0) + (1 if positive else 0)
+            neg = int(row["negative_hits"] or 0) + (0 if positive else 1)
+            serves = int(row["serve_count"] or 0) + 1
+            # Laplace-smoothed Bayesian utility in (0, 1): starts at 0.5, rises on wins, drops on regressions
+            utility = round((pos + 1.0) / (pos + neg + 2.0), 4)
+            conn.execute(
+                """
+                UPDATE memories
+                SET positive_hits=?, negative_hits=?, serve_count=?, utility_score=?, last_served_at=?
+                WHERE key=?
+                """,
+                (pos, neg, serves, utility, now, k),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.append_grepmem(
+            "MEMORY_FEEDBACK",
+            {"key": k, "positive": bool(positive), "utility_score": utility, "note": note[:140]},
+            task_family="runtime",
+        )
+        return {
+            "status": "UPDATED",
+            "key": k,
+            "positive_hits": pos,
+            "negative_hits": neg,
+            "serve_count": serves,
+            "utility_score": utility,
+        }
+
     def search_memory(
         self,
         query: str,
@@ -227,6 +274,7 @@ class KnowledgeFabric:
         params: list[Any] = [int(caller_ring)]
         if not include_revoked:
             clauses.append("m.status = 'active'")
+            clauses.append("NOT (m.negative_hits >= 2 AND m.utility_score < 0.25)")
         if task_family:
             fam = task_family.strip().lower()
             if include_global:
@@ -243,11 +291,12 @@ class KnowledgeFabric:
                 rows = conn.execute(
                     f"""
                     SELECT m.key, m.tags, m.text, m.authority, m.status, m.superseded_by,
-                           m.task_family, m.capability_ring, m.origin_uri, m.updated_at
+                           m.task_family, m.capability_ring, m.origin_uri, m.updated_at,
+                           m.utility_score, m.positive_hits, m.negative_hits
                     FROM memories_fts f
                     JOIN memories m ON m.id = f.rowid
                     WHERE memories_fts MATCH ? AND {where_extra}
-                    ORDER BY bm25(memories_fts), m.key ASC
+                    ORDER BY bm25(memories_fts) * (1.25 - 0.5 * m.utility_score), m.utility_score DESC, m.key ASC
                     LIMIT ?
                     """,
                     [q, *params, int(limit)],
@@ -257,10 +306,11 @@ class KnowledgeFabric:
                 rows = conn.execute(
                     f"""
                     SELECT m.key, m.tags, m.text, m.authority, m.status, m.superseded_by,
-                           m.task_family, m.capability_ring, m.origin_uri, m.updated_at
+                           m.task_family, m.capability_ring, m.origin_uri, m.updated_at,
+                           m.utility_score, m.positive_hits, m.negative_hits
                     FROM memories m
                     WHERE (m.key LIKE ? OR m.tags LIKE ? OR m.text LIKE ?) AND {where_extra}
-                    ORDER BY m.key ASC
+                    ORDER BY m.utility_score DESC, m.key ASC
                     LIMIT ?
                     """,
                     [like, like, like, *params, int(limit)],
@@ -314,7 +364,8 @@ class KnowledgeFabric:
             k = item["key"]
             age_days = max(0.0, (now - float(item.get("updated_at", now))) / 86400.0)
             decay = 0.5 ** (age_days / max(1.0, half_life_days))
-            scores[k] = scores.get(k, 0.0) + (1.0 / (k_rrf + rank)) * (0.7 + 0.3 * decay)
+            util_w = 0.6 + 0.8 * float(item.get("utility_score", 0.5))
+            scores[k] = scores.get(k, 0.0) + (1.0 / (k_rrf + rank)) * (0.7 + 0.3 * decay) * util_w
             item["match_hop"] = 0
             records[k] = item
 

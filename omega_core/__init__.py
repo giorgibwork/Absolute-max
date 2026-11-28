@@ -9,13 +9,20 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-VERSION = "6.3.0-apex"
+VERSION = "6.4.0-apex"
 
 # Capability Rings (Weakest-Agent Safety Invariant)
 R0_READONLY = 0
 R1_SANDBOX = 1
 R2_WORKSPACE = 2
 R3_EXTERNAL_APPROVED = 3
+
+# Five-Level Action Reversibility Classes (arXiv:2611.22075)
+REV0_NO_EFFECT = "REV0_NO_EFFECT"
+REV1_RESTORABLE = "REV1_RESTORABLE"
+REV2_COMPENSABLE = "REV2_COMPENSABLE"
+REV3_HARD_TO_RECOVER = "REV3_HARD_TO_RECOVER"
+REV4_IRREVERSIBLE = "REV4_IRREVERSIBLE"
 
 RING_NAMES = {
     R0_READONLY: "R0_READONLY",

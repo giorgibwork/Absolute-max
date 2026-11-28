@@ -24,7 +24,10 @@ import sqlite3
 import time
 import urllib.parse
 import urllib.request
+import warnings
 from typing import Any
+
+warnings.filterwarnings("ignore", message=".*SOCKS support in urllib3.*")
 
 from . import OmegaPaths, ensure_dirs, get_paths
 from .research import (
@@ -384,6 +387,62 @@ def query_local_corpus(topic: str, *, db_path: str | None = None, top_k: int = 8
     }
 
 
+def canonical_url_key(url: str) -> str:
+    """Epistemic Guard mirror normalization (arXiv:2611.27095): collapse arXiv abs/html & regional URL mirrors."""
+    u = (url or "").strip().split("#")[0]
+    m = re.search(r"arxiv\.org/(?:abs|html|pdf)/(\d{4}\.\d{4,5})(?:v\d+)?", u, re.IGNORECASE)
+    if m:
+        return f"arxiv:{m.group(1)}"
+    u = re.sub(r"/loc/[a-z0-9_-]+/", "/", u, flags=re.IGNORECASE)
+    return u.rstrip("/").lower()
+
+
+def content_shingles(text: str, n: int = 5) -> set[str]:
+    """Deterministic normalized 5-word shingle set for lightly-edited syndicated mirror collapse."""
+    words = re.findall(r"[a-z0-9\u4e00-\u9fff]{3,}", (text or "").lower())
+    if len(words) < n + 3:
+        return set()
+    return {" ".join(words[i : i + n]) for i in range(min(120, len(words) - n + 1))}
+
+
+def collapse_syndicated_mirrors(rows: list[dict[str, str]], jaccard_threshold: float = 0.65) -> tuple[list[dict[str, str]], int]:
+    """Collapse URL mirrors & verbatim/lightly-edited syndicated copies (Epistemic Guard, arXiv:2611.27095)."""
+    by_canon: dict[str, dict[str, str]] = {}
+    collapsed = 0
+    for r in rows:
+        ck = canonical_url_key(r["url"])
+        if ck in by_canon:
+            collapsed += 1
+            if len(r["text"]) > len(by_canon[ck]["text"]):
+                by_canon[ck] = r
+        else:
+            by_canon[ck] = r
+
+    # Process longer texts first so richest canonical source always wins
+    candidates = sorted(by_canon.values(), key=lambda x: len(x["text"]), reverse=True)
+    kept: list[dict[str, str]] = []
+    kept_shingles: list[set[str]] = []
+    for r in candidates:
+        sh = content_shingles(r["text"])
+        if not sh:
+            kept.append(r)
+            continue
+        is_mirror = False
+        for existing in kept_shingles:
+            inter = len(sh & existing)
+            if inter:
+                union = len(sh | existing)
+                if union and (inter / union) >= jaccard_threshold:
+                    is_mirror = True
+                    break
+        if is_mirror:
+            collapsed += 1
+        else:
+            kept.append(r)
+            kept_shingles.append(sh)
+    return kept, collapsed
+
+
 def bulk_crawl(
     topic: str,
     *,
@@ -472,12 +531,9 @@ def bulk_crawl(
                 elif res.get("error") == "gated_antibot_skipped":
                     gated_skipped += 1
 
-    # 3. Deduplicate & save batch into SQLite FTS5
-    dedup_map: dict[str, dict[str, str]] = {}
-    for r in rows:
-        u = r["url"]
-        if u not in dedup_map or len(r["text"]) > len(dedup_map[u]["text"]):
-            dedup_map[u] = r
+    # 3. Epistemic Guard mirror collapse + deduplicate & save batch into SQLite FTS5
+    unique_rows, mirrors_collapsed = collapse_syndicated_mirrors(rows)
+    dedup_map: dict[str, dict[str, str]] = {r["url"]: r for r in unique_rows}
 
     now = int(time.time())
     conn = _corpus_conn(db)
@@ -522,6 +578,7 @@ def bulk_crawl(
         "chinese_query": zh_q,
         "db_path": db,
         "unique_docs_saved": len(dedup_map),
+        "mirrors_collapsed": mirrors_collapsed,
         "full_pages_fetched": fetched_full,
         "gated_antibot_skipped": gated_skipped,
         "total_docs_in_db": total_in_db,

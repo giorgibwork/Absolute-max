@@ -133,10 +133,34 @@ class DreamEngine:
                         edges_created += 1
         return {"edges_upserted": edges_created}
 
+    def prune_low_utility_memories(self, *, min_negatives: int = 3, max_utility: float = 0.25) -> dict[str, Any]:
+        """Skill Deletion (arXiv:2611.28244 + Leto 2611.33005): revoke persistently harmful memories."""
+        kf = KnowledgeFabric(self.paths)
+        conn = connect_vault(self.paths)
+        pruned: list[str] = []
+        try:
+            rows = conn.execute(
+                """
+                SELECT key, utility_score, positive_hits, negative_hits
+                FROM memories
+                WHERE status = 'active' AND negative_hits >= ? AND utility_score < ?
+                """,
+                (int(min_negatives), float(max_utility)),
+            ).fetchall()
+        finally:
+            conn.close()
+        for r in rows:
+            kf.revoke_memory(r["key"], superseded_by="pruned:low_utility")
+            pruned.append(r["key"])
+        if pruned:
+            kf.append_grepmem("SKILL_DELETION_PRUNED", {"pruned_keys": pruned}, task_family="runtime")
+        return {"pruned_count": len(pruned), "pruned_keys": pruned}
+
     def run_dream(self, *, sync_obsidian: bool = True, index_code: bool = True, vault_dir: str = DEFAULT_VAULT_DIR) -> dict[str, Any]:
         """Execute full offline consolidation pass without touching live session prompts."""
         t0 = time.monotonic()
         failures = self.cluster_failures()
+        pruned = self.prune_low_utility_memories()
         edges = self.rebuild_memory_edges()
 
         code_stats: dict[str, Any] = {}
@@ -152,10 +176,11 @@ class DreamEngine:
             obs_stats = ObsidianSync(vault_dir=vault_dir, paths=self.paths).sync_all(force_config=False)
 
         kf = KnowledgeFabric(self.paths)
-        kf.append_grepmem("DREAM_CONSOLIDATION", {"failures": failures, "edges": edges}, task_family="runtime")
+        kf.append_grepmem("DREAM_CONSOLIDATION", {"failures": failures, "pruned": pruned, "edges": edges}, task_family="runtime")
         return {
             "ok": True,
             "failures": failures,
+            "pruned": pruned,
             "memory_edges": edges,
             "codegraph": code_stats,
             "obsidian": {"nodes_written": obs_stats.get("nodes_written", 0)} if obs_stats else {},

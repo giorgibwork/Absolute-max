@@ -23,6 +23,11 @@ from . import (
     R1_SANDBOX,
     R2_WORKSPACE,
     R3_EXTERNAL_APPROVED,
+    REV0_NO_EFFECT,
+    REV1_RESTORABLE,
+    REV2_COMPENSABLE,
+    REV3_HARD_TO_RECOVER,
+    REV4_IRREVERSIBLE,
     RING_NAMES,
     OmegaPaths,
     ensure_dirs,
@@ -69,6 +74,13 @@ PRIVILEGE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(r"(?:^|[;&|]\s*)(?:su|sudo)\b"),
         "Privilege escalation (su/sudo) requires explicit human approval.",
+    ),
+    (
+        re.compile(
+            r"(?:^|[;&|]\s*)(?:adb|ladb|rish|shizuku|axsh)\b|\b(?:pm\s+(?:disable(?:-user)?|uninstall)|settings\s+(?:put|delete|reset)|device_config\s+(?:put|delete|set_sync_disabled_for_tests)|setprop)\b",
+            re.IGNORECASE,
+        ),
+        "REV3_HARD_TO_RECOVER: Android uid 2000 / system-state mutation requires prior-state snapshot and explicit human approval.",
     ),
     (
         re.compile(r"\bchmod\s+777\b.*(?:\.ssh|\.mcp_secret|config\.json)"),
@@ -128,6 +140,7 @@ class GateDecision:
     reason: str
     ring_required: int = R0_READONLY
     approval_id: str | None = None
+    reversibility_class: str = REV0_NO_EFFECT
 
     def to_hook_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {"decision": self.decision}
@@ -137,6 +150,23 @@ class GateDecision:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def classify_reversibility(action_class: str, cmd: str = "", tool: str = "") -> str:
+    """Classify action reversibility under Five-Level Vocabulary (REV0-REV4, arXiv:2611.22075)."""
+    if action_class in ("DESTRUCTIVE", "SPEND", "SECRET_LEAK"):
+        return REV4_IRREVERSIBLE
+    if action_class == "PRIVILEGE_CHANGE":
+        return REV3_HARD_TO_RECOVER
+    if action_class == "EXTERNAL_MUTATION":
+        if re.search(r"\b(?:--force|-f|delete)\b", cmd, re.IGNORECASE):
+            return REV4_IRREVERSIBLE
+        return REV2_COMPENSABLE
+    if action_class == "WORKSPACE_MUTATION" or tool in ("write_file", "edit_file"):
+        return REV1_RESTORABLE
+    if action_class == "READ":
+        return REV0_NO_EFFECT
+    return REV3_HARD_TO_RECOVER
 
 
 def scan_secrets(text: str) -> list[str]:
@@ -358,22 +388,23 @@ def evaluate_tool_call(
                 reason=f"Blocked writing raw secret material ({','.join(sec_hits)}) to {target_path}.",
                 ring_required=R3_EXTERNAL_APPROVED,
             )
-        return GateDecision("allow", "WORKSPACE_MUTATION", "Permitted workspace file edit.", R2_WORKSPACE)
+        return GateDecision("allow", "WORKSPACE_MUTATION", "Permitted workspace file edit.", R2_WORKSPACE, reversibility_class=REV1_RESTORABLE)
 
     # 2. Shell command classification & enforcement
     if tool == "run_command" or cmd:
         action_class, req_ring, reason = classify_command(cmd)
+        rev_cls = classify_reversibility(action_class, cmd=cmd, tool=tool)
         if action_class == "DESTRUCTIVE":
-            return GateDecision("deny", action_class, reason, req_ring)
+            return GateDecision("deny", action_class, reason, req_ring, reversibility_class=rev_cls)
 
         if action_class in ("SPEND", "PRIVILEGE_CHANGE", "EXTERNAL_MUTATION"):
             approved = _check_approved_ticket(p, cmd)
             if approved:
-                return GateDecision("allow", action_class, f"Approved via ticket {approved}.", req_ring, approved)
+                return GateDecision("allow", action_class, f"Approved via ticket {approved}.", req_ring, approved, rev_cls)
             if action_class == "SPEND":
-                return GateDecision("deny", action_class, reason, req_ring)
+                return GateDecision("deny", action_class, reason, req_ring, reversibility_class=rev_cls)
             if autonomy_mode == "PREPARE_ONLY" or caller_ring < R3_EXTERNAL_APPROVED:
-                return GateDecision("ask", action_class, reason, req_ring)
+                return GateDecision("ask", action_class, reason, req_ring, reversibility_class=rev_cls)
 
         if req_ring > caller_ring:
             return GateDecision(
@@ -381,6 +412,7 @@ def evaluate_tool_call(
                 action_class=action_class,
                 reason=f"Weakest-Agent gate: action requires {RING_NAMES.get(req_ring, req_ring)}, caller has {RING_NAMES.get(caller_ring, caller_ring)}.",
                 ring_required=req_ring,
+                reversibility_class=rev_cls,
             )
 
         # 3. Per-session circuit breaker + SPIDES taint gate
