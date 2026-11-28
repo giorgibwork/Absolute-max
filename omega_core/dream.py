@@ -19,7 +19,7 @@ import sqlite3
 import time
 from typing import Any
 
-from . import OmegaPaths, ensure_dirs, get_paths
+from . import OmegaPaths, ensure_dirs, get_paths, tune_sqlite
 from .codegraph import CodeGraph
 from .forge import SkillForge
 from .memory import KnowledgeFabric, connect_vault
@@ -32,8 +32,7 @@ def _connect_evo(paths: OmegaPaths) -> sqlite3.Connection:
     ensure_dirs(paths)
     conn = sqlite3.connect(paths.evolution_db, timeout=5.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout=5000;")
+    tune_sqlite(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS failure_signatures (
@@ -176,6 +175,9 @@ class DreamEngine:
         if index_code:
             cg = CodeGraph(self.paths)
             code_stats["omega_core"] = cg.index_directory(os.path.join(self.paths.repo_root, "omega_core"))
+            adapters_dir = os.path.join(self.paths.repo_root, "adapters")
+            if os.path.isdir(adapters_dir):
+                code_stats["adapters"] = cg.index_directory(adapters_dir)
             tools_dir = os.path.expanduser("~/tools")
             if os.path.isdir(tools_dir):
                 code_stats["tools"] = cg.index_directory(tools_dir)

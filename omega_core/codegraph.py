@@ -14,7 +14,7 @@ import sqlite3
 import time
 from typing import Any
 
-from . import OmegaPaths, ensure_dirs, get_paths, tune_sqlite
+from . import OmegaPaths, ensure_dirs, get_paths, safe_fts_query, tune_sqlite
 
 SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build", ".antigem"}
 
@@ -120,12 +120,14 @@ class CodeGraph:
 
         try:
             existing = {r["path"]: r["sha256"] for r in conn.execute("SELECT path, sha256 FROM files").fetchall()}
+            seen_on_disk: set[str] = set()
             for root, dirs, files in os.walk(abs_root):
                 dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
                 for fn in sorted(files):
                     if not fn.endswith(".py") or ".bak" in fn:
                         continue
                     fp = os.path.join(root, fn)
+                    seen_on_disk.add(fp)
                     try:
                         with open(fp, "r", encoding="utf-8", errors="replace") as f:
                             src = f.read()
@@ -164,6 +166,15 @@ class CodeGraph:
                     indexed += 1
                     symbols_added += len(syms)
                     edges_added += len(edges)
+            # Prune deleted/renamed files under abs_root so stale ghost symbols never linger
+            prefix = abs_root.rstrip(os.sep) + os.sep
+            pruned_files = 0
+            for old_path in list(existing.keys()):
+                if (old_path.startswith(prefix) or old_path == abs_root) and old_path not in seen_on_disk:
+                    conn.execute("DELETE FROM symbols WHERE file_path = ?", (old_path,))
+                    conn.execute("DELETE FROM call_edges WHERE caller_file = ?", (old_path,))
+                    conn.execute("DELETE FROM files WHERE path = ?", (old_path,))
+                    pruned_files += 1
             conn.commit()
             tot_syms = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
             tot_edges = conn.execute("SELECT COUNT(*) FROM call_edges").fetchone()[0]
@@ -174,6 +185,7 @@ class CodeGraph:
             "root": abs_root,
             "files_indexed": indexed,
             "files_unchanged_skipped": skipped,
+            "files_pruned": pruned_files,
             "errors": errors,
             "symbols_added": symbols_added,
             "edges_added": edges_added,
@@ -212,6 +224,7 @@ class CodeGraph:
         q = query.strip()
         if not q:
             return []
+        fts_q = safe_fts_query(q, mode="OR", max_terms=5) or q
         conn = _connect(self.paths)
         try:
             try:
@@ -224,9 +237,11 @@ class CodeGraph:
                     ORDER BY bm25(symbols_fts), s.name ASC
                     LIMIT ?
                     """,
-                    (q, int(limit)),
+                    (fts_q, int(limit)),
                 ).fetchall()
             except sqlite3.OperationalError:
+                rows = []
+            if not rows:
                 like = f"%{q}%"
                 rows = conn.execute(
                     """

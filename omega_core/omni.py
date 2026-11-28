@@ -25,24 +25,31 @@ import time
 import urllib.parse
 import urllib.request
 import warnings
+import xml.etree.ElementTree as ET
 from typing import Any
 
 warnings.filterwarnings("ignore", message=".*SOCKS support in urllib3.*")
 
-from . import OmegaPaths, ensure_dirs, get_paths, tune_sqlite
+from . import OmegaPaths, ensure_dirs, get_paths, safe_fts_query, tokenize_multilingual, tune_sqlite
 from .research import (
     _discover_arxiv,
     _discover_github_issues,
     _discover_github_repos,
+    _discover_habr_ru,
     _discover_hn_comments,
     _discover_hn_stories,
+    _discover_lobsters,
     _discover_openalex,
+    _discover_qiita_jp,
     _discover_stackexchange,
     expand_chinese_query,
+    expand_japanese_query,
+    expand_russian_query,
     extract_anchor_terms,
 )
 
-UA = "Mozilla/5.0 (Linux; Android 16) OmegaApexOmni/6.3 (PublicResearch)"
+UA = "Mozilla/5.0 (Linux; Android 16) OmegaApexOmni/8.0 (PublicResearch)"
+MD_MIRROR_HOSTS = ("antigravity.google/docs/", "aistudio.google.com/docs/")
 MAX_PAGE_BYTES = 196608
 BLOCKED_SIGNATURES = (
     "cf-browser-verification",
@@ -202,11 +209,37 @@ def _extract_response_content(raw: bytes, final_url: str, content_type: str = ""
     return (title or final_url, text, links, "")
 
 
+def maybe_markdown_mirror_url(url: str) -> str | None:
+    """Return raw .md mirror URL for llms.txt-enabled Google docs (5-10x smaller than HTML)."""
+    u = (url or "").strip().split("#")[0].split("?")[0].rstrip("/")
+    low = u.lower()
+    if any(h in low for h in MD_MIRROR_HOSTS) and not low.endswith(".md"):
+        return u + ".md"
+    return None
+
+
 def fetch_public_page(url: str, timeout: int = 7, client: Any | None = None) -> dict[str, Any]:
-    """Fetch a public HTTP(S) page or PDF via pooled httpx[http2] -> urllib; skips anti-bot/binary gates honestly."""
+    """Fetch a public HTTP(S) page, .md mirror, or PDF via pooled httpx[http2] -> urllib; skips anti-bot/binary gates."""
     t0 = time.monotonic()
+    md_url = maybe_markdown_mirror_url(url)
 
     def _finish(raw: bytes, final_url: str, status: int, engine: str, content_type: str = "") -> dict[str, Any]:
+        # Fast-path clean raw Markdown from .md mirrors without HTML parsing overhead
+        if final_url.lower().endswith(".md") and b"\x00" not in raw[:1024]:
+            md_txt = raw.decode("utf-8", errors="replace").strip()
+            if len(md_txt) > 80 and not md_txt.lstrip().startswith("<!DOCTYPE") and not md_txt.lstrip().startswith("<html"):
+                first_h = next((ln.lstrip("# ").strip() for ln in md_txt.splitlines() if ln.strip().startswith("#")), final_url)
+                return {
+                    "ok": True,
+                    "engine": f"{engine}_md_mirror",
+                    "url": final_url,
+                    "status": status,
+                    "title": first_h[:180],
+                    "text": md_txt[:10000],
+                    "links": [],
+                    "sha256": hashlib.sha256(md_txt.encode("utf-8")).hexdigest()[:16],
+                    "ms": round((time.monotonic() - t0) * 1000.0, 1),
+                }
         title, text, links, err = _extract_response_content(raw, final_url, content_type)
         if err:
             return {"ok": False, "url": final_url, "status": status, "error": err}
@@ -224,6 +257,15 @@ def fetch_public_page(url: str, timeout: int = 7, client: Any | None = None) -> 
 
     try:
         if client is not None:
+            if md_url:
+                try:
+                    rm = client.get(md_url, timeout=timeout)
+                    if rm.status_code == 200 and len(rm.content) > 80:
+                        out_m = _finish(rm.content[:MAX_PAGE_BYTES], str(rm.url), rm.status_code, "httpx_http2_pool", rm.headers.get("content-type", ""))
+                        if out_m.get("ok"):
+                            return out_m
+                except Exception:
+                    pass
             r = client.get(url, timeout=timeout)
             if r.status_code >= 400:
                 return {"ok": False, "url": url, "status": r.status_code, "error": f"HTTP {r.status_code}"}
@@ -231,6 +273,15 @@ def fetch_public_page(url: str, timeout: int = 7, client: Any | None = None) -> 
         import httpx  # type: ignore
 
         with httpx.Client(http2=True, follow_redirects=True, timeout=timeout, headers={"User-Agent": UA}) as cli:
+            if md_url:
+                try:
+                    rm = cli.get(md_url)
+                    if rm.status_code == 200 and len(rm.content) > 80:
+                        out_m = _finish(rm.content[:MAX_PAGE_BYTES], str(rm.url), rm.status_code, "httpx_http2", rm.headers.get("content-type", ""))
+                        if out_m.get("ok"):
+                            return out_m
+                except Exception:
+                    pass
             r = cli.get(url)
             if r.status_code >= 400:
                 return {"ok": False, "url": url, "status": r.status_code, "error": f"HTTP {r.status_code}"}
@@ -351,7 +402,8 @@ def _corpus_conn(db_path: str) -> sqlite3.Connection:
             title TEXT NOT NULL,
             published TEXT NOT NULL DEFAULT '',
             text TEXT NOT NULL,
-            fetched_at INTEGER NOT NULL
+            fetched_at INTEGER NOT NULL,
+            lane TEXT NOT NULL DEFAULT 'general'
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
             title, text, url, source, content='docs', content_rowid='id'
@@ -372,6 +424,9 @@ def _corpus_conn(db_path: str) -> sqlite3.Connection:
         END;
         """
     )
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(docs)").fetchall()}
+    if "lane" not in cols:
+        conn.execute("ALTER TABLE docs ADD COLUMN lane TEXT NOT NULL DEFAULT 'general'")
     conn.commit()
     return conn
 
@@ -379,20 +434,24 @@ def _corpus_conn(db_path: str) -> sqlite3.Connection:
 TIER1_DOMAINS = (
     "arxiv.org", "github.com", "aclanthology.org", "openreview.net", "neurips.cc",
     "icml.cc", "iclr.cc", "sqlite.org", "docs.python.org", "developer.android.com",
-    "antigravity.google", "research.google", "microsoft.com/en-us/research", "proceedings.mlr.press",
+    "antigravity.google", "aistudio.google.com", "research.google", "blog.google",
+    "microsoft.com/en-us/research", "proceedings.mlr.press",
 )
-TIER2_DOMAINS = ("news.ycombinator.com", "openalex.org", "huggingface.co", "ietf.org", "rfc-editor.org")
+TIER2_DOMAINS = (
+    "news.ycombinator.com", "lobste.rs", "news.smol.ai", "simonwillison.net",
+    "openalex.org", "huggingface.co", "qiita.com", "habr.com", "ietf.org", "rfc-editor.org",
+)
 LOW_SIGNAL_DOMAINS = ("medium.com", "dev.to", "geeksforgeeks.org", "w3schools.com", "quora.com")
 
 
 def score_source_authority(url: str, source: str = "") -> float:
-    """Doctrine Part V §19 deterministic source quality hierarchy (1.0=primary paper/code -> 0.3=low-signal)."""
+    """Doctrine Part V §19 deterministic source quality hierarchy (1.0=primary paper/code -> 0.35=low-signal)."""
     u = (url or "").lower()
     s = (source or "").lower()
     if any(d in u for d in TIER1_DOMAINS) or s.startswith(("arxiv", "github_repo", "github_issue")):
         return 1.0
-    if any(d in u for d in TIER2_DOMAINS) or s.startswith(("hn_", "openalex")):
-        return 0.85
+    if any(d in u for d in TIER2_DOMAINS) or s.startswith(("hn_", "openalex", "lobsters", "smol_ai", "hf_daily", "qiita", "habr")):
+        return 0.88
     if "wikipedia.org" in u or "stackoverflow.com" in u or s.startswith("wikipedia"):
         return 0.70
     if any(d in u for d in LOW_SIGNAL_DOMAINS):
@@ -400,32 +459,58 @@ def score_source_authority(url: str, source: str = "") -> float:
     return 0.60
 
 
+def _url_domain(url: str) -> str:
+    try:
+        return (urllib.parse.urlparse(url).netloc or "").lower().removeprefix("www.")
+    except Exception:
+        return ""
+
+
+def _infer_lane(source: str, lane: str = "") -> str:
+    if lane and lane != "general":
+        return lane
+    s = (source or "").lower()
+    if "hostile" in s or "issue" in s or "lobsters" in s or "hn_comment" in s:
+        return "hostile"
+    if any(k in s for k in ("cn_", "gitee", "v2ex", "qiita", "habr", "geeknews", "ddg_zh")):
+        return "multilingual"
+    if any(k in s for k in ("smol_ai", "hf_daily", "simonwillison", "google_ai_blog")):
+        return "ai_pulse"
+    if any(k in s for k in ("arxiv", "openalex", "pubmed")):
+        return "academic"
+    return "general"
+
+
 def _bm25_top_hits(conn: sqlite3.Connection, anchor: str, top_k: int) -> list[tuple]:
-    """AND-first BM25 FTS5 retrieval re-ranked by Doctrine §19 Source Authority."""
-    tokens = list(dict.fromkeys(re.findall(r"[A-Za-z0-9_]{3,}", anchor)))
+    """Multilingual AND-first BM25 FTS5 retrieval with §19 authority, per-domain cap (<=2), and lane diversity."""
+    tokens = tokenize_multilingual(anchor, min_latin=2, min_cjk=2, max_tokens=8)
     if not tokens:
         return conn.execute(
-            "SELECT url, source, title, published, substr(text, 1, 180) FROM docs ORDER BY fetched_at DESC LIMIT ?",
+            "SELECT url, source, title, published, substr(text, 1, 180), lane FROM docs ORDER BY fetched_at DESC LIMIT ?",
             (top_k,),
         ).fetchall()
 
     seen: set[str] = set()
     raw_hits: list[tuple[float, tuple]] = []
-    queries = []
+    queries: list[tuple[str, float]] = []
     if len(tokens) >= 2:
-        queries.append((" AND ".join(tokens[:3]), 1.35))
-    queries.append((" OR ".join(tokens[:5]), 1.0))
+        q_and = safe_fts_query(" ".join(tokens[:3]), mode="AND", max_terms=3)
+        if q_and:
+            queries.append((q_and, 1.35))
+    q_or = safe_fts_query(" ".join(tokens[:6]), mode="OR", max_terms=6)
+    if q_or:
+        queries.append((q_or, 1.0))
 
     for q, boost in queries:
         try:
             batch = conn.execute(
                 """
-                SELECT d.url, d.source, d.title, d.published, substr(d.text, 1, 180)
+                SELECT d.url, d.source, d.title, d.published, substr(d.text, 1, 180), d.lane
                 FROM docs_fts f JOIN docs d ON d.id = f.rowid
                 WHERE docs_fts MATCH ?
                 ORDER BY bm25(docs_fts) LIMIT ?
                 """,
-                (q, top_k * 3),
+                (q, max(top_k * 5, 30)),
             ).fetchall()
             for rank, r in enumerate(batch, 1):
                 if r[0] not in seen:
@@ -436,22 +521,86 @@ def _bm25_top_hits(conn: sqlite3.Connection, anchor: str, top_k: int) -> list[tu
         except sqlite3.OperationalError:
             continue
 
+    # CJK / substring fallback when SQLite unicode61 misses unspaced CJK phrases
+    has_non_ascii = any(ord(ch) > 127 for ch in anchor)
+    if len(raw_hits) < top_k and (has_non_ascii or not raw_hits):
+        for tok in tokens[:4]:
+            like = f"%{tok}%"
+            sub_rows = conn.execute(
+                """
+                SELECT url, source, title, published, substr(text, 1, 180), lane
+                FROM docs
+                WHERE title LIKE ? OR text LIKE ?
+                ORDER BY fetched_at DESC LIMIT ?
+                """,
+                (like, like, top_k * 3),
+            ).fetchall()
+            for rank, r in enumerate(sub_rows, 1):
+                if r[0] not in seen:
+                    seen.add(r[0])
+                    auth = score_source_authority(r[0], r[1])
+                    raw_hits.append(((0.85 / (10.0 + rank)) * auth, r))
+
     if not raw_hits:
         return conn.execute(
-            "SELECT url, source, title, published, substr(text, 1, 180) FROM docs ORDER BY fetched_at DESC LIMIT ?",
+            "SELECT url, source, title, published, substr(text, 1, 180), lane FROM docs ORDER BY fetched_at DESC LIMIT ?",
             (top_k,),
         ).fetchall()
+
     raw_hits.sort(key=lambda x: x[0], reverse=True)
-    return [r for _, r in raw_hits[:top_k]]
+
+    # Anti-consensus selection: cap any single domain at 2 hits and guarantee hostile/multilingual slots when available
+    picked: list[tuple] = []
+    picked_urls: set[str] = set()
+    domain_counts: dict[str, int] = {}
+
+    def _try_add(r: tuple) -> bool:
+        u = r[0]
+        if u in picked_urls:
+            return False
+        dom = _url_domain(u)
+        if dom and domain_counts.get(dom, 0) >= 2:
+            return False
+        picked.append(r)
+        picked_urls.add(u)
+        if dom:
+            domain_counts[dom] = domain_counts.get(dom, 0) + 1
+        return True
+
+    # 1. Guarantee top hostile/contrarian + top multilingual hit when top_k >= 4
+    if top_k >= 4:
+        for _, r in raw_hits:
+            if _infer_lane(r[1], r[5]) == "hostile" and _try_add(r):
+                break
+        for _, r in raw_hits:
+            if _infer_lane(r[1], r[5]) == "multilingual" and _try_add(r):
+                break
+
+    # 2. Fill remaining slots by authority-weighted BM25 respecting domain cap <= 2
+    for _, r in raw_hits:
+        if len(picked) >= top_k:
+            break
+        _try_add(r)
+
+    # 3. Backfill if domain cap left fewer than top_k
+    if len(picked) < top_k:
+        for _, r in raw_hits:
+            if len(picked) >= top_k:
+                break
+            if r[0] not in picked_urls:
+                picked.append(r)
+                picked_urls.add(r[0])
+
+    return picked[:top_k]
 
 
 def query_local_corpus(topic: str, *, db_path: str | None = None, top_k: int = 8) -> dict[str, Any]:
-    """<5ms local SQLite FTS5 BM25 query against already-crawled bulk pages (0 network, 0 LLM tokens)."""
+    """<5ms multilingual local SQLite FTS5 BM25 query against already-crawled bulk pages (0 network, 0 LLM tokens)."""
     t0 = time.monotonic()
     db = db_path or os.path.expanduser("~/.antigem/memory/omega_corpus.db")
     if not os.path.isfile(db):
         return {"topic": topic, "db_path": db, "total_docs_in_db": 0, "elapsed_ms": 0.0, "top_hits": []}
-    anchor = extract_anchor_terms(topic, max_terms=4)
+    anchor = extract_anchor_terms(topic, max_terms=5)
     conn = _corpus_conn(db)
     try:
         total = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
@@ -464,7 +613,17 @@ def query_local_corpus(topic: str, *, db_path: str | None = None, top_k: int = 8
         "total_docs_in_db": total,
         "elapsed_ms": round((time.monotonic() - t0) * 1000.0, 2),
         "llm_tokens_used": 0,
-        "top_hits": [{"url": r[0], "source": r[1], "title": r[2][:120], "published": r[3], "snippet": r[4]} for r in rows],
+        "top_hits": [
+            {
+                "url": r[0],
+                "source": r[1],
+                "lane": _infer_lane(r[1], r[5]),
+                "title": r[2][:120],
+                "published": r[3],
+                "snippet": r[4],
+            }
+            for r in rows
+        ],
     }
 
 
@@ -479,8 +638,8 @@ def canonical_url_key(url: str) -> str:
 
 
 def content_shingles(text: str, n: int = 5) -> set[str]:
-    """Deterministic normalized 5-word shingle set for lightly-edited syndicated mirror collapse."""
-    words = re.findall(r"[a-z0-9\u4e00-\u9fff]{3,}", (text or "").lower())
+    """Deterministic multilingual 5-token shingle set for syndicated mirror collapse (EN/CJK/RU/GE)."""
+    words = [w.lower() for w in tokenize_multilingual(text or "", min_latin=2, min_cjk=2, max_tokens=160)]
     if len(words) < n + 3:
         return set()
     return {" ".join(words[i : i + n]) for i in range(min(120, len(words) - n + 1))}
@@ -537,27 +696,44 @@ def bulk_crawl(
     t0 = time.monotonic()
     db = db_path or os.path.expanduser("~/.antigem/memory/omega_corpus.db")
     anchor = extract_anchor_terms(topic, max_terms=3)
+    anchor_2 = extract_anchor_terms(topic, max_terms=2)
     zh_q = expand_chinese_query(topic)
+    ja_q = expand_japanese_query(topic)
+    ru_q = expand_russian_query(topic)
+    hostile_q = f"{anchor_2} broken OR regression OR myth OR overrated"
 
-    # 1. High-yield parallel multi-index seed discovery (EN + CN + Academic + GitHub + HN + DDG/Wiki)
+    # 1. High-yield parallel multilingual + hostile non-consensus seed discovery
     rows: list[dict[str, str]] = []
     seed_urls: list[str] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
-        futs = [
-            ex.submit(discover_ddgs, topic, 40),
-            ex.submit(discover_ddgs, zh_q, 30),
-            ex.submit(_discover_arxiv, topic, min(200, max(60, target_pages // 2))),
-            ex.submit(_discover_openalex, topic, min(80, max(30, target_pages // 5))),
-            ex.submit(_discover_hn_stories, anchor, False, 80),
-            ex.submit(_discover_hn_comments, anchor, 80),
-            ex.submit(_discover_github_repos, anchor, False, 50),
-            ex.submit(_discover_github_repos, topic, True, 35),
-            ex.submit(_discover_github_issues, anchor, 40),
-            ex.submit(_discover_stackexchange, anchor, 35),
-        ]
-        for f in futs:
+    engines_ok: list[str] = []
+    engines_empty: list[str] = []
+    engine_errors: dict[str, str] = {}
+    seed_jobs: list[tuple[str, str, Any, tuple]] = [
+        ("ddg_en", "general", discover_ddgs, (topic, 35)),
+        ("ddg_hostile", "hostile", discover_ddgs, (hostile_q, 25)),
+        ("ddg_zh", "multilingual", discover_ddgs, (zh_q, 25)),
+        ("arxiv", "academic", _discover_arxiv, (anchor, min(160, max(40, target_pages // 3)))),
+        ("openalex", "academic", _discover_openalex, (anchor, min(60, max(25, target_pages // 6)))),
+        ("hn_stories", "general", _discover_hn_stories, (anchor_2, False, 60)),
+        ("hn_hostile", "hostile", lambda q, n: _discover_hn_comments(q, limit=n, hostile=True), (anchor_2, 50)),
+        ("github_en", "primary", lambda q, n: _discover_github_repos(q, chinese=False, limit=n), (anchor_2, 40)),
+        ("github_cn", "multilingual", lambda q, n: _discover_github_repos(q, chinese=True, limit=n), (topic, 30)),
+        ("github_issues", "hostile", _discover_github_issues, (anchor_2, 35)),
+        ("qiita_jp", "multilingual", _discover_qiita_jp, (topic, 15)),
+        ("habr_ru", "multilingual", _discover_habr_ru, (topic, 10)),
+        ("lobsters", "hostile", _discover_lobsters, (topic, 15)),
+        ("stackoverflow", "general", _discover_stackexchange, (anchor, 25)),
+    ]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as ex:
+        fut_map = {ex.submit(fn, *args): (ename, dlane) for ename, dlane, fn, args in seed_jobs}
+        for f in concurrent.futures.as_completed(fut_map, timeout=22):
+            ename, dlane = fut_map[f]
             try:
-                items = f.result(timeout=18)
+                items = f.result(timeout=2)
+                if items:
+                    engines_ok.append(ename)
+                else:
+                    engines_empty.append(ename)
                 for it in items:
                     u = it.get("url", "").strip()
                     if not u:
@@ -568,14 +744,16 @@ def bulk_crawl(
                         rows.append(
                             {
                                 "url": u,
-                                "source": it.get("source", "seed"),
+                                "source": it.get("source") or ename,
+                                "lane": it.get("lane") or dlane,
                                 "title": it.get("title", u)[:180],
                                 "published": it.get("published_at", ""),
                                 "text": txt[:10000],
                             }
                         )
-            except Exception:
-                pass
+            except Exception as e:
+                engines_empty.append(ename)
+                engine_errors[ename] = f"{type(e).__name__}: {str(e)[:80]}"
 
     # 2. Threaded full-page fetch with shared HTTP/2 connection pool + 1-hop BFS expansion
     seen_urls: set[str] = set()
@@ -604,7 +782,7 @@ def bulk_crawl(
                 batch: list[str] = []
                 while queue and len(batch) < max_workers and (fetched_full + len(batch)) < crawl_cap:
                     u = queue.popleft()
-                    if u not in seen_urls and not u.endswith((".pdf", ".zip", ".png", ".jpg", ".mp4")):
+                    if u not in seen_urls and not u.lower().endswith((".zip", ".tar", ".gz", ".png", ".jpg", ".jpeg", ".mp4", ".apk", ".dmg")):
                         seen_urls.add(u)
                         batch.append(u)
                 if not batch:
@@ -616,6 +794,7 @@ def bulk_crawl(
                             {
                                 "url": res["url"],
                                 "source": f"full:{res.get('engine', 'http')}",
+                                "lane": "primary",
                                 "title": res.get("title", res["url"])[:180],
                                 "published": "",
                                 "text": res["text"][:10000],
@@ -633,8 +812,8 @@ def bulk_crawl(
             except Exception:
                 pass
 
-    # Filter off-topic StackOverflow hits (require >=2 topic terms in title+text)
-    topic_terms = [w for w in re.findall(r"[a-z0-9]{4,}", topic.lower()) if w not in {"2025", "2026", "with", "from", "that", "this"}]
+    # Filter off-topic StackOverflow hits (multilingual-safe)
+    topic_terms = [w.lower() for w in tokenize_multilingual(topic, min_latin=3, min_cjk=2, max_tokens=10) if w.lower() not in {"2025", "2026", "with", "from", "that", "this"}]
     if len(topic_terms) >= 2:
         filtered_rows = []
         for r in rows:
@@ -648,26 +827,32 @@ def bulk_crawl(
     # 3. Epistemic Guard mirror collapse + deduplicate & save batch into SQLite FTS5
     unique_rows, mirrors_collapsed = collapse_syndicated_mirrors(rows)
     dedup_map: dict[str, dict[str, str]] = {r["url"]: r for r in unique_rows}
+    lane_counts: dict[str, int] = {}
+    for r in dedup_map.values():
+        ln = _infer_lane(r.get("source", ""), r.get("lane", ""))
+        r["lane"] = ln
+        lane_counts[ln] = lane_counts.get(ln, 0) + 1
 
     now = int(time.time())
     conn = _corpus_conn(db)
     try:
         conn.executemany(
             """
-            INSERT INTO docs (url, source, title, published, text, fetched_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO docs (url, source, title, published, text, fetched_at, lane)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(url) DO UPDATE SET
                 source=excluded.source,
                 title=excluded.title,
+                lane=CASE WHEN excluded.lane != 'general' THEN excluded.lane ELSE docs.lane END,
                 text=CASE WHEN length(excluded.text) > length(docs.text) THEN excluded.text ELSE docs.text END,
                 fetched_at=excluded.fetched_at
             """,
-            [(r["url"], r["source"], r["title"], r.get("published", ""), r["text"], now) for r in dedup_map.values()],
+            [(r["url"], r["source"], r["title"], r.get("published", ""), r["text"], now, r.get("lane", "general")) for r in dedup_map.values()],
         )
         conn.commit()
         total_in_db = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
 
-        # Return ultra-compact top_k AND-first BM25 hits (<2.5KB) at 0 LLM tokens!
+        # Return ultra-compact top_k lane-diverse & authority-ranked BM25 hits at 0 LLM tokens!
         top = _bm25_top_hits(conn, anchor, top_k)
     finally:
         conn.close()
@@ -675,7 +860,13 @@ def bulk_crawl(
     return {
         "topic": topic,
         "chinese_query": zh_q,
+        "japanese_query": ja_q,
+        "russian_query": ru_q,
         "db_path": db,
+        "engines_ok": sorted(engines_ok),
+        "engines_empty": sorted(engines_empty),
+        "engine_errors": engine_errors,
+        "lane_counts": lane_counts,
         "unique_docs_saved": len(dedup_map),
         "mirrors_collapsed": mirrors_collapsed,
         "full_pages_fetched": fetched_full,
@@ -683,7 +874,203 @@ def bulk_crawl(
         "total_docs_in_db": total_in_db,
         "elapsed_s": round(time.monotonic() - t0, 2),
         "llm_tokens_used": 0,
-        "top_hits": [{"url": r[0], "source": r[1], "title": r[2][:120], "published": r[3], "snippet": r[4]} for r in top],
+        "top_hits": [
+            {"url": r[0], "source": r[1], "lane": _infer_lane(r[1], r[5]), "title": r[2][:120], "published": r[3], "snippet": r[4]}
+            for r in top
+        ],
+    }
+
+
+def ingest_ai_pulse(
+    *,
+    query: str = "",
+    limit: int = 12,
+    db_path: str | None = None,
+) -> dict[str, Any]:
+    """Ingest live AI X/Twitter digest (news.smol.ai) + HF Daily Papers + Lobsters + Simon Willison + Google AI + V2EX + Habr + GeekNews at 0 LLM tokens."""
+    t0 = time.monotonic()
+    db = db_path or os.path.expanduser("~/.antigem/memory/omega_corpus.db")
+    import httpx  # type: ignore
+
+    rows: list[dict[str, str]] = []
+    sources_ok: list[str] = []
+    sources_failed: list[str] = []
+
+    def _strip_html(s: str) -> str:
+        return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s or "")).strip()
+
+    def _pull_rss(cli: Any, name: str, url: str, lane: str, max_items: int = 12) -> list[dict[str, str]]:
+        r = cli.get(url)
+        if r.status_code != 200:
+            return []
+        root = ET.fromstring(r.content[:2621440])
+        out = []
+        # Handle RSS <item> and Atom <entry>
+        ns = {"a": "http://www.w3.org/2005/Atom", "c": "http://purl.org/rss/1.0/modules/content/"}
+        items = root.findall(".//item")
+        if items:
+            for it in items:
+                title = (it.findtext("title") or "").strip()
+                if title.lower() in ("not much happened today", "quiet day"):
+                    continue
+                link = (it.findtext("link") or "").strip()
+                body = it.findtext("c:encoded", default="", namespaces=ns) or it.findtext("description") or ""
+                pub = (it.findtext("pubDate") or "")[:25]
+                txt = _strip_html(body) or title
+                if link.startswith("http") and len(txt) >= 20:
+                    out.append({"url": link, "source": name, "lane": lane, "title": title[:180], "published": pub, "text": txt[:10000]})
+                    if len(out) >= max_items:
+                        break
+        else:
+            for ent in root.findall("a:entry", ns)[:max_items]:
+                title = (ent.findtext("a:title", "", ns) or "").strip()
+                lk_el = ent.find("a:link", ns)
+                link = str(lk_el.get("href") or "") if lk_el is not None else ""
+                body = ent.findtext("a:content", "", ns) or ent.findtext("a:summary", "", ns) or ""
+                pub = (ent.findtext("a:updated", "", ns) or ent.findtext("a:published", "", ns) or "")[:25]
+                txt = _strip_html(body) or title
+                if link.startswith("http") and len(txt) >= 20:
+                    out.append({"url": link, "source": name, "lane": lane, "title": title[:180], "published": pub, "text": txt[:10000]})
+        return out
+
+    def _pull_hf_papers(cli: Any) -> list[dict[str, str]]:
+        r = cli.get("https://huggingface.co/api/daily_papers?limit=15")
+        if r.status_code != 200:
+            return []
+        out = []
+        for it in r.json()[:15]:
+            p = it.get("paper") or {}
+            pid = str(p.get("id") or "").strip()
+            if not pid:
+                continue
+            title = str(p.get("title") or it.get("title") or pid)
+            summary = str(p.get("summary") or it.get("summary") or title)
+            up = p.get("upvotes", 0)
+            out.append({
+                "url": f"https://huggingface.co/papers/{pid}",
+                "source": f"hf_daily(up={up})",
+                "lane": "academic",
+                "title": title[:180],
+                "published": str(it.get("publishedAt") or "")[:20],
+                "text": summary[:6000],
+            })
+        return out
+
+    def _pull_lobsters(cli: Any) -> list[dict[str, str]]:
+        r = cli.get("https://lobste.rs/t/ai.json")
+        if r.status_code != 200:
+            return []
+        out = []
+        for it in r.json()[:15]:
+            u = str(it.get("url") or it.get("comments_url") or "")
+            if u.startswith("http"):
+                out.append({
+                    "url": u,
+                    "source": f"lobsters(score={it.get('score', 0)})",
+                    "lane": "hostile",
+                    "title": str(it.get("title") or "")[:180],
+                    "published": str(it.get("created_at") or "")[:20],
+                    "text": (str(it.get("description") or "") or str(it.get("title") or ""))[:4000],
+                })
+        return out
+
+    def _pull_v2ex(cli: Any) -> list[dict[str, str]]:
+        r = cli.get("https://www.v2ex.com/api/topics/hot.json")
+        if r.status_code != 200:
+            return []
+        out = []
+        for it in r.json()[:12]:
+            u = str(it.get("url") or "")
+            if u.startswith("http"):
+                out.append({
+                    "url": u,
+                    "source": f"v2ex_cn(replies={it.get('replies', 0)})",
+                    "lane": "multilingual",
+                    "title": str(it.get("title") or "")[:180],
+                    "published": "",
+                    "text": (str(it.get("content") or "") or str(it.get("title") or ""))[:4000],
+                })
+        return out
+
+    with httpx.Client(http2=True, follow_redirects=True, timeout=12, headers={"User-Agent": UA}) as cli:
+        jobs: list[tuple[str, Any]] = [
+            ("smol_ai_x_digest", lambda: _pull_rss(cli, "smol_ai_x_digest", "https://news.smol.ai/rss.xml", "ai_pulse", 8)),
+            ("hf_daily_papers", lambda: _pull_hf_papers(cli)),
+            ("lobsters_ai", lambda: _pull_lobsters(cli)),
+            ("simon_willison", lambda: _pull_rss(cli, "simonwillison", "https://simonwillison.net/atom/everything/", "ai_pulse", 10)),
+            ("google_ai_blog", lambda: _pull_rss(cli, "google_ai_blog", "https://blog.google/technology/ai/rss/", "primary", 10)),
+            ("habr_ru_ai", lambda: _pull_rss(cli, "habr_ru", "https://habr.com/ru/rss/hubs/artificial_intelligence/articles/?fl=ru", "multilingual", 10)),
+            ("geeknews_kr", lambda: _pull_rss(cli, "geeknews_kr", "https://news.hada.io/rss/news", "multilingual", 10)),
+            ("v2ex_cn_hot", lambda: _pull_v2ex(cli)),
+        ]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            fmap = {ex.submit(fn): name for name, fn in jobs}
+            for f in concurrent.futures.as_completed(fmap, timeout=20):
+                name = fmap[f]
+                try:
+                    items = f.result(timeout=2)
+                    if items:
+                        sources_ok.append(name)
+                        rows.extend(items)
+                    else:
+                        sources_failed.append(name)
+                except Exception:
+                    sources_failed.append(name)
+
+    unique_rows, collapsed = collapse_syndicated_mirrors(rows)
+    now = int(time.time())
+    conn = _corpus_conn(db)
+    try:
+        conn.executemany(
+            """
+            INSERT INTO docs (url, source, title, published, text, fetched_at, lane)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(url) DO UPDATE SET
+                source=excluded.source,
+                title=excluded.title,
+                lane=excluded.lane,
+                text=CASE WHEN length(excluded.text) > length(docs.text) THEN excluded.text ELSE docs.text END,
+                fetched_at=excluded.fetched_at
+            """,
+            [(r["url"], r["source"], r["title"], r.get("published", ""), r["text"], now, r.get("lane", "ai_pulse")) for r in unique_rows],
+        )
+        conn.commit()
+        total_in_db = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+        if query.strip():
+            hits = _bm25_top_hits(conn, extract_anchor_terms(query, max_terms=5), limit)
+            out_items = [{"url": r[0], "source": r[1], "lane": _infer_lane(r[1], r[5]), "title": r[2][:120], "published": r[3], "snippet": r[4]} for r in hits]
+        else:
+            # Diverse top highlights across sources
+            seen_src: dict[str, int] = {}
+            out_items = []
+            for r in unique_rows:
+                base_s = r["source"].split("(")[0]
+                if seen_src.get(base_s, 0) >= 2:
+                    continue
+                seen_src[base_s] = seen_src.get(base_s, 0) + 1
+                out_items.append({
+                    "url": r["url"],
+                    "source": r["source"],
+                    "lane": r["lane"],
+                    "title": r["title"][:120],
+                    "published": r.get("published", ""),
+                    "snippet": r["text"][:200],
+                })
+                if len(out_items) >= limit:
+                    break
+    finally:
+        conn.close()
+
+    return {
+        "ok": len(sources_ok) > 0,
+        "sources_ok": sorted(sources_ok),
+        "sources_failed": sorted(sources_failed),
+        "items_ingested": len(unique_rows),
+        "mirrors_collapsed": collapsed,
+        "total_docs_in_db": total_in_db,
+        "elapsed_s": round(time.monotonic() - t0, 2),
+        "llm_tokens_used": 0,
+        "highlights": out_items,
     }
 
 

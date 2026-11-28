@@ -18,7 +18,7 @@ import sqlite3
 import time
 from typing import Any
 
-from . import R1_SANDBOX, VERSION, OmegaPaths, get_paths
+from . import R1_SANDBOX, VERSION, OmegaPaths, get_paths, tune_sqlite
 from .fabric import IntelligenceFabric
 from .memory import KnowledgeFabric, connect_vault
 from .mission import MissionKernel
@@ -489,6 +489,7 @@ class ObsidianSync:
             if os.path.isfile(bounties_db):
                 try:
                     bc = sqlite3.connect(bounties_db, timeout=3.0)
+                    tune_sqlite(bc)
                     brows = bc.execute(
                         "SELECT url, repo, number, title, payout_raw, comments, labels, score, substr(body_snippet, 1, 400) FROM bounties ORDER BY score DESC LIMIT 50"
                     ).fetchall()
@@ -582,6 +583,7 @@ class ObsidianSync:
                     continue
                 try:
                     cc = sqlite3.connect(db_path, timeout=3.0)
+                    tune_sqlite(cc)
                     cnt = cc.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
                     # Pick diverse high-signal docs (skip 0-point HN noise!)
                     rows = cc.execute(

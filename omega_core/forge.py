@@ -15,7 +15,7 @@ import sqlite3
 import time
 from typing import Any
 
-from . import OmegaPaths, ensure_dirs, get_paths, tune_sqlite
+from . import OmegaPaths, ensure_dirs, get_paths, safe_fts_query, tune_sqlite
 from .kernel import screen_memory_write
 
 
@@ -134,11 +134,7 @@ class SkillForge:
             params.append(task_family.strip().lower())
         where_sql = " AND ".join(clauses)
 
-        fts_q = q
-        if not any(op in q for op in (" OR ", " AND ", '"', "*")):
-            toks = re.findall(r"[A-Za-z0-9_\u4e00-\u9fff]{2,}", q)
-            if toks:
-                fts_q = " OR ".join(dict.fromkeys(toks[:6]))
+        fts_q = safe_fts_query(q, mode="OR", max_terms=6) or q
 
         conn = _connect(self.paths)
         try:
@@ -156,6 +152,8 @@ class SkillForge:
                     [fts_q, *params, int(limit)],
                 ).fetchall()
             except sqlite3.OperationalError:
+                rows = []
+            if not rows:
                 like = f"%{q}%"
                 rows = conn.execute(
                     f"""

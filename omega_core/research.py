@@ -1,14 +1,14 @@
-"""Adaptive Multi-Lingual Research Engine (v6.1 — Chinese-for-All + GitHub + 12+ High-Signal Indexes).
+"""Adaptive Multilingual Non-Consensus Research Engine (v8.0 — EN/ZH/JA/RU/KO + GitHub + Hostile Lane).
 
-Implements Doctrine Part V + Giorgi's Non-Consensus & Chinese-for-Everything standards:
-- 4 Orthogonal Search Lanes ($0.00, pure Python stdlib + gh CLI):
+Implements Doctrine Part V + Giorgi's Non-Consensus & Multilingual standards:
+- 5 Orthogonal Search Lanes ($0.00, pure Python stdlib + gh CLI):
   1. Primary Code & Issues Lane: GitHub Issues/PRs (sorted by reactions/comments) + GitHub Repos
-  2. Chinese Deep Ecosystem Lane (ALL domains): CN GitHub + V2EX + Gitee + auto-expanded Chinese query terms
-  3. Academic & Technical Papers Lane: arXiv + OpenAlex (250M+ works, citation-sorted) + Semantic Scholar / Europe PMC + StackExchange
-  4. Practitioner & Hostile Failure Lane: HN Stories (points >= 5 — zero pts=0 spam!) + HN Comments + Failure/Regression query expansion + DDG Instant
-- Date-sensitivity guard + Section 20 Anti-Loop verification cache
-- Optional Pure Gemini Cross-Pool Parallel Asymmetric Jury (Neon XHigh + Argon High + Hydrogen XHigh)
-- Optional auto-export of verified Research Dossiers to Obsidian (/sdcard/Documents/OmegaVault)
+  2. Multilingual Deep Ecosystem Lane: CN GitHub + Gitee + V2EX + JP Qiita + RU Habr + auto-expanded ZH/JA/RU terms
+  3. Academic & Technical Papers Lane: arXiv (trimmed anchors) + OpenAlex (250M+ works) + Europe PMC + StackExchange
+  4. Hostile Failure & Contrarian Lane: HN Comments (fixed non-OR Algolia queries!) + GitHub Issues + Lobsters anti-hype
+  5. Practitioner & Live Pulse Lane: HN Stories (pts >= 5) + DDG Instant + in-process local FTS5 (`query_local_corpus`)
+- Date-sensitivity guard + Section 20 Anti-Loop verification cache + per-lane health telemetry
+- Optional Pure Gemini 4 Parallel Asymmetric Jury (Neon XHigh + Carbon High + Hydrogen XHigh)
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from typing import Any
 
-from . import OmegaPaths, get_paths
+from . import OmegaPaths, get_paths, safe_fts_query, tokenize_multilingual
 from .fabric import IntelligenceFabric
 from .jury import AsymmetricJury
 from .memory import KnowledgeFabric, connect_vault
@@ -41,18 +41,38 @@ DATE_SENSITIVE_RX = re.compile(
     re.IGNORECASE,
 )
 
-# Idiomatic Chinese expansion map across ALL domains (AI, coding, finance, hardware, fitness, gaming)
+# Idiomatic Chinese expansion map across 14 technical & personal domains
 ZH_TERM_MAP: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\b(?:agent|harness|memory|llm|ai|model|claude|gemini|openai|rag)\b", re.I), "大模型 智能体 架构 实测 优化"),
-    (re.compile(r"\b(?:trading|quant|polymarket|kelly|market|crypto|alpha|arbitrage)\b", re.I), "量化 交易 策略 预测市场 实战"),
-    (re.compile(r"\b(?:android|hyperos|miui|xiaomi|poco|vermeer|kernel|touch|latency|fps)\b", re.I), "澎湃OS 调度 触控 延迟 优化 酷安"),
-    (re.compile(r"\b(?:armwrestling|gym|hypertrophy|strength|protein|fat\s*loss|workout)\b", re.I), "腕力 力量训练 增肌 减脂 动作 生物力学"),
-    (re.compile(r"\b(?:obsidian|knowledge\s*graph|notes|workflow|productivity)\b", re.I), "Obsidian 知识图谱 双链 工作流 配置"),
-    (re.compile(r"\b(?:security|audit|injection|sandbox|exploit|vulnerability)\b", re.I), "安全 审计 提示注入 沙箱 防护"),
-    (re.compile(r"\b(?:python|rust|sqlite|database|performance|benchmark|cache)\b", re.I), "性能优化 源码 基准测试 踩坑"),
+    (re.compile(r"\b(?:agent|harness|memory|llm|ai|model|gemini|antigravity|rag|mcp|prompt)\b", re.I), "大模型 智能体 架构 实测 优化"),
+    (re.compile(r"\b(?:trading|quant|polymarket|kelly|market|crypto|alpha|arbitrage|defi|ton)\b", re.I), "量化 交易 策略 预测市场 实战"),
+    (re.compile(r"\b(?:android|hyperos|miui|xiaomi|poco|vermeer|kernel|touch|latency|fps|termux)\b", re.I), "澎湃OS 调度 触控 延迟 优化 酷安"),
+    (re.compile(r"\b(?:armwrestling|gym|hypertrophy|strength|protein|fat\s*loss|workout|pronation|tendon)\b", re.I), "腕力 力量训练 增肌 减脂 生物力学"),
+    (re.compile(r"\b(?:obsidian|knowledge\s*graph|notes|workflow|productivity)\b", re.I), "知识图谱 双链 Obsidian 工作流 配置"),
+    (re.compile(r"\b(?:security|audit|injection|sandbox|exploit|vulnerability|auth)\b", re.I), "安全 审计 提示注入 沙箱 防护"),
+    (re.compile(r"\b(?:python|rust|go|sqlite|database|performance|benchmark|cache|fts5)\b", re.I), "性能优化 源码 基准测试 踩坑"),
+    (re.compile(r"\b(?:react|next|typescript|web|frontend|css|browser|chrome|devtools)\b", re.I), "前端 性能 实战 踩坑 源码"),
+    (re.compile(r"\b(?:gpu|cuda|vram|chip|npu|snapdragon|quantization|gguf|vllm)\b", re.I), "显卡 推理 量化 加速 实测"),
+    (re.compile(r"\b(?:docker|kubernetes|cloud|firebase|deploy|ci|github\s*actions|serverless)\b", re.I), "云原生 部署 架构 实战 踩坑"),
+    (re.compile(r"\b(?:game|roblox|tsb|combo|input|frame|ping|network)\b", re.I), "游戏 帧率 延迟 机制 优化"),
+    (re.compile(r"\b(?:linux|bash|zsh|shell|cli|terminal|ssh|git|worktree)\b", re.I), "终端 命令行 效率 脚本 技巧"),
+    (re.compile(r"\b(?:paper|arxiv|research|study|proof|theorem|science|biology)\b", re.I), "论文 复现 评测 实验 分析"),
+    (re.compile(r"\b(?:visa|ielts|uk|immigration|tax|finance|bank)\b", re.I), "攻略 经验 避坑 实测"),
 ]
 
-UA = "OmegaApexResearch/6.1 (Android; $0.00 pure-stdlib)"
+JA_TERM_MAP: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b(?:agent|llm|ai|gemini|antigravity|mcp|rag|cli)\b", re.I), "エージェント 実践 検証 開発"),
+    (re.compile(r"\b(?:python|rust|sqlite|performance|cache|database)\b", re.I), "高速化 実装 ベンチマーク"),
+    (re.compile(r"\b(?:security|sandbox|audit|injection)\b", re.I), "セキュリティ 対策 検証"),
+    (re.compile(r"\b(?:android|linux|termux|git|docker)\b", re.I), "環境構築 ハック 実践"),
+]
+
+RU_TERM_MAP: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b(?:agent|llm|ai|gemini|antigravity|mcp|rag)\b", re.I), "ИИ агенты практика разбор"),
+    (re.compile(r"\b(?:android|kernel|linux|security|reverse|perf|sqlite)\b", re.I), "оптимизация разбор практика"),
+    (re.compile(r"\b(?:armwrestling|strength|gym|pronation)\b", re.I), "армрестлинг тренировка биомеханика"),
+]
+
+UA = "OmegaApexResearch/8.0 (Android; $0.00 pure-stdlib)"
 
 
 def is_date_sensitive(question: str) -> bool:
@@ -67,8 +87,8 @@ STOPWORDS = {
 
 
 def extract_anchor_terms(question: str, max_terms: int = 3) -> str:
-    """Trim long questions to top 2-3 anchor keywords for strict-AND engines (GitHub, HN, Gitee)."""
-    tokens = re.findall(r"[A-Za-z0-9\u4e00-\u9fff][A-Za-z0-9._\u4e00-\u9fff-]{1,}", question)
+    """Trim long questions to top 2-3 multilingual anchor keywords for strict-AND engines (GitHub, HN, arXiv, Qiita)."""
+    tokens = tokenize_multilingual(question, min_latin=2, min_cjk=2, max_tokens=20)
     anchors = [t for t in tokens if t.lower() not in STOPWORDS]
     dedup = list(dict.fromkeys(anchors))[:max_terms]
     return " ".join(dedup) if dedup else question.strip()[:60]
@@ -78,13 +98,39 @@ def expand_chinese_query(question: str) -> str:
     """Build a tight 2-3 term Chinese query so strict-AND CN GitHub / Gitee actually return high-signal hits."""
     if re.search(r"[\u4e00-\u9fff]", question):
         return extract_anchor_terms(question, max_terms=3)
-    zh_anchor = "优化"
+    zh_anchor = "实测"
     for rx, zh in ZH_TERM_MAP:
         if rx.search(question):
             zh_anchor = zh.split()[0]
             break
     core_en = extract_anchor_terms(question, max_terms=2)
     return f"{core_en} {zh_anchor}".strip()
+
+
+def expand_japanese_query(question: str) -> str:
+    """Build a tight Japanese query for Qiita / Zenn practitioner search."""
+    if re.search(r"[\u3040-\u30ff]", question):
+        return extract_anchor_terms(question, max_terms=3)
+    ja_anchor = "実践"
+    for rx, ja in JA_TERM_MAP:
+        if rx.search(question):
+            ja_anchor = ja.split()[0]
+            break
+    core_en = extract_anchor_terms(question, max_terms=2)
+    return f"{core_en} {ja_anchor}".strip()
+
+
+def expand_russian_query(question: str) -> str:
+    """Build a tight Russian query for Habr / Russian systems & biomechanics search."""
+    if re.search(r"[\u0400-\u04ff]", question):
+        return extract_anchor_terms(question, max_terms=3)
+    ru_anchor = "разбор"
+    for rx, ru in RU_TERM_MAP:
+        if rx.search(question):
+            ru_anchor = ru.split()[0]
+            break
+    core_en = extract_anchor_terms(question, max_terms=2)
+    return f"{core_en} {ru_anchor}".strip()
 
 
 def _http_get_json(url: str, timeout: int = 8) -> Any:
@@ -124,28 +170,131 @@ def _discover_hn_stories(query: str, date_sensitive: bool, limit: int = 5) -> li
     return out
 
 
-def _discover_hn_comments(query: str, limit: int = 5) -> list[dict[str, str]]:
-    """HN practitioner comments — where senior engineers expose failure modes and real trade-offs."""
-    url = f"https://hn.algolia.com/api/v1/search?query={urllib.parse.quote(query)}&tags=comment&hitsPerPage={limit}"
-    data = _http_get_json(url, timeout=8)
-    if not isinstance(data, dict):
+def _discover_hn_comments(query: str, limit: int = 5, *, hostile: bool = False) -> list[dict[str, str]]:
+    """HN practitioner comments — fixed Algolia query syntax (no broken literal OR)."""
+    queries = [f"{query} broken", f"{query} problem", f"{query} issue"] if hostile else [query]
+    per_q = max(2, (limit + len(queries) - 1) // len(queries))
+    out: list[dict[str, str]] = []
+    seen_oids: set[str] = set()
+    for q in queries:
+        url = f"https://hn.algolia.com/api/v1/search?query={urllib.parse.quote(q)}&tags=comment&hitsPerPage={per_q}"
+        data = _http_get_json(url, timeout=8)
+        if not isinstance(data, dict):
+            continue
+        for h in data.get("hits", []):
+            oid = str(h.get("objectID") or "")
+            if not oid or oid in seen_oids:
+                continue
+            txt = re.sub(r"<[^>]+>", " ", str(h.get("comment_text") or ""))
+            txt = re.sub(r"\s+", " ", txt).strip()
+            if len(txt) > 80:
+                seen_oids.add(oid)
+                out.append(
+                    {
+                        "lane": "hostile",
+                        "source": "hn_hostile_comment" if hostile else "hn_comment",
+                        "url": f"https://news.ycombinator.com/item?id={oid}",
+                        "title": str(h.get("story_title") or "HN Comment")[:160],
+                        "snippet": txt[:600],
+                        "published_at": str(h.get("created_at") or "")[:20],
+                    }
+                )
+                if len(out) >= limit:
+                    return out
+    return out
+
+
+def _discover_qiita_jp(query: str, limit: int = 4) -> list[dict[str, str]]:
+    """Japanese Qiita public API v2 — deep Japanese engineering guides ($0.00)."""
+    q2 = extract_anchor_terms(query, max_terms=2)
+    data = _http_get_json(f"https://qiita.com/api/v2/items?page=1&per_page={limit}&query={urllib.parse.quote(q2)}", timeout=8)
+    if not isinstance(data, list) or not data:
+        q1 = extract_anchor_terms(query, max_terms=1)
+        data = _http_get_json(f"https://qiita.com/api/v2/items?page=1&per_page={limit}&query={urllib.parse.quote(q1)}", timeout=8)
+    if not isinstance(data, list):
         return []
     out = []
-    for h in data.get("hits", []):
-        oid = h.get("objectID") or ""
-        txt = re.sub(r"<[^>]+>", " ", str(h.get("comment_text") or ""))
-        txt = re.sub(r"\s+", " ", txt).strip()
-        if oid and len(txt) > 80:
+    for it in data[:limit]:
+        u = str(it.get("url") or "")
+        if u.startswith("http"):
+            body = re.sub(r"\s+", " ", str(it.get("body") or ""))[:500]
+            out.append(
+                {
+                    "lane": "multilingual",
+                    "source": f"qiita_jp(likes={it.get('likes_count', 0)})",
+                    "url": u,
+                    "title": str(it.get("title") or "")[:180],
+                    "snippet": body,
+                    "published_at": str(it.get("updated_at") or "")[:20],
+                }
+            )
+    return out
+
+
+def _discover_lobsters(query: str, limit: int = 4) -> list[dict[str, str]]:
+    """Lobsters senior-engineer anti-hype AI & systems feed ($0.00)."""
+    data = _http_get_json("https://lobste.rs/t/ai.json", timeout=8)
+    if not isinstance(data, list):
+        return []
+    toks = [t.lower() for t in tokenize_multilingual(query, min_latin=3, max_tokens=6)]
+    out = []
+    for it in data:
+        title = str(it.get("title") or "")
+        desc = str(it.get("description") or "")
+        blob = (title + " " + desc + " " + " ".join(it.get("tags") or [])).lower()
+        if toks and not any(t in blob for t in toks):
+            continue
+        u = str(it.get("url") or it.get("comments_url") or "")
+        if u.startswith("http"):
             out.append(
                 {
                     "lane": "hostile",
-                    "source": "hn_comment",
-                    "url": f"https://news.ycombinator.com/item?id={oid}",
-                    "title": str(h.get("story_title") or "HN Comment")[:160],
-                    "snippet": txt[:600],
-                    "published_at": str(h.get("created_at") or "")[:20],
+                    "source": f"lobsters(score={it.get('score', 0)})",
+                    "url": u,
+                    "title": title[:180],
+                    "snippet": (desc or title)[:500],
+                    "published_at": str(it.get("created_at") or "")[:20],
                 }
             )
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _discover_habr_ru(query: str, limit: int = 4) -> list[dict[str, str]]:
+    """Russian Habr AI & systems RSS feed filtered by query ($0.00)."""
+    url = "https://habr.com/ru/rss/hubs/artificial_intelligence/articles/?fl=ru"
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            xml_raw = r.read(163840)
+        root = ET.fromstring(xml_raw)
+    except Exception:
+        return []
+    toks = [t.lower() for t in tokenize_multilingual(query, min_latin=3, max_tokens=6)]
+    out = []
+    for item in root.findall(".//item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        desc = re.sub(r"<[^>]+>", " ", (item.findtext("description") or ""))
+        desc = re.sub(r"\s+", " ", desc).strip()
+        pub = (item.findtext("pubDate") or "")[:25]
+        blob = (title + " " + desc).lower()
+        if toks and not any(t in blob for t in toks):
+            continue
+        if link.startswith("http"):
+            out.append(
+                {
+                    "lane": "multilingual",
+                    "source": "habr_ru",
+                    "url": link,
+                    "title": title[:180],
+                    "snippet": desc[:500],
+                    "published_at": pub,
+                }
+            )
+            if len(out) >= limit:
+                break
     return out
 
 
@@ -365,23 +514,25 @@ def live_discover_multi_index(
     date_sensitive: bool,
     deep_indexes: bool = False,
 ) -> tuple[list[dict[str, str]], list[str]]:
-    """Run parallel high-signal multi-index discovery (trimmed anchors for strict-AND GitHub/HN/CN; full query for academic)."""
+    """Run parallel high-signal multi-index discovery (EN + ZH + JA + RU + Hostile + Academic)."""
     anchor_q = extract_anchor_terms(query, max_terms=3)
     anchor_2 = extract_anchor_terms(query, max_terms=2)
-    failure_q = f"{anchor_2} issue OR broken OR regression"
     tasks: list[tuple[str, Any, tuple]] = [
         ("hn_stories_pts5", _discover_hn_stories, (anchor_2, date_sensitive, 5)),
-        ("hn_comments", _discover_hn_comments, (failure_q, 4)),
+        ("hn_hostile_comments", lambda q: _discover_hn_comments(q, limit=5, hostile=True), (anchor_2,)),
         ("github_repos_en", _discover_github_repos, (anchor_q,)),
         ("github_repos_cn", lambda q: _discover_github_repos(q, chinese=True, limit=4), (query,)),
         ("github_issues", _discover_github_issues, (anchor_2, 4)),
-        ("arxiv", _discover_arxiv, (query, 4)),
+        ("arxiv", _discover_arxiv, (anchor_q, 4)),
         ("ddg_instant", _discover_ddg, (anchor_q, 2)),
+        ("qiita_jp", _discover_qiita_jp, (query, 4)),
+        ("lobsters", _discover_lobsters, (query, 4)),
     ]
     if deep_indexes:
         tasks += [
             ("gitee_cn", _discover_gitee_cn, (query, 4)),
-            ("openalex", _discover_openalex, (query, 4)),
+            ("habr_ru", _discover_habr_ru, (query, 4)),
+            ("openalex", _discover_openalex, (anchor_q, 4)),
             ("stackoverflow", _discover_stackexchange, (anchor_q, 4)),
             ("europe_pmc", _discover_europe_pmc, (anchor_q, 3)),
         ]
@@ -460,34 +611,32 @@ class ResearchEngine:
         errors: list[str] = []
         cache_hits = 0
 
-        # Step 2: Prior knowledge & memory retrieval BEFORE paying rediscovery cost
-        stop = {"the", "and", "for", "with", "what", "how", "does", "from", "that", "this", "are", "was", "were", "into", "about"}
-        kw = [w for w in re.findall(r"[A-Za-z0-9_]{3,}", question.lower()) if w not in stop]
-        fts_q = " OR ".join(dict.fromkeys(kw[:6])) if kw else question
-        prior_mems = self.kf.search_memory(fts_q, task_family=task_family, limit=5)
+        # Step 2: Prior knowledge & multilingual memory retrieval BEFORE paying rediscovery cost
+        fts_q = safe_fts_query(question, mode="OR", max_terms=6)
+        prior_mems = self.kf.search_memory(fts_q, task_family=task_family, limit=5) if fts_q else []
         if prior_mems:
             t_first = round((time.monotonic() - t0) * 1000.0, 1)
             for pm in prior_mems:
                 positive_snippets.append(f"[prior:{pm['key']}|auth={pm['authority']}] {pm['text'][:300]}")
 
-        # Local FTS5 corpus query (<5ms, $0.00)
-        deep_crawl = os.path.join(self.tools_dir, "deep_crawl.py")
-        if corpus_query and os.path.exists(deep_crawl):
+        # In-process local SQLite FTS5 corpus query (<5ms, $0.00, 0 subprocess overhead)
+        cq = (corpus_query or question).strip()
+        if cq:
             try:
-                r = subprocess.run(
-                    ["python3", deep_crawl, "query", corpus_query, "--limit", "10"],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-                if r.returncode == 0 and r.stdout.strip():
+                from .omni import query_local_corpus
+
+                loc = query_local_corpus(cq, top_k=6)
+                hits = loc.get("top_hits") or []
+                if hits:
                     if t_first is None:
                         t_first = round((time.monotonic() - t0) * 1000.0, 1)
+                    summary_lines = [f"[{h['source']}|{h['url']}] {h['title']}: {h['snippet']}" for h in hits]
+                    summary_blob = "\n".join(summary_lines)
                     ev = self.kf.record_evidence(
-                        claim_text=f"Local FTS5 corpus match for: {question[:140]}",
+                        claim_text=f"Local FTS5 corpus match ({len(hits)} hits) for: {question[:120]}",
                         source_id="local_fts5_corpus",
-                        locator=f"corpus://{corpus_query}",
-                        content_sample=r.stdout[:2000],
+                        locator=f"corpus://{cq[:80]}",
+                        content_sample=summary_blob[:2000],
                         mission_id=mission_id,
                         source_type="dataset",
                         retrieval_scope="snippet",
@@ -496,7 +645,12 @@ class ResearchEngine:
                         verification_status="verified",
                     )
                     evidence_ids.append(ev["evidence_id"])
-                    positive_snippets.append(f"[corpus:{corpus_query}] {r.stdout[:1200]}")
+                    for h in hits:
+                        line = f"[corpus:{h['source']}|{h['url']}] {h['title']}: {h['snippet']}"
+                        if h.get("lane") == "hostile" or "hostile" in str(h.get("source", "")):
+                            hostile_snippets.append(line)
+                        else:
+                            positive_snippets.append(line)
             except Exception as e:
                 errors.append(f"corpus_query:{e}")
 
@@ -634,13 +788,21 @@ class ResearchEngine:
             readiness = "UNVERIFIED"
 
         total_ms = round((time.monotonic() - t0) * 1000.0, 1)
+        lane_counts: dict[str, int] = {}
+        for d in discovered_meta:
+            ln = str(d.get("lane") or "general")
+            lane_counts[ln] = lane_counts.get(ln, 0) + 1
         return {
             "mode": m,
             "date": today,
             "date_sensitive": date_sens,
             "chinese_query": zh_query,
+            "japanese_query": expand_japanese_query(question),
+            "russian_query": expand_russian_query(question),
             "indexes_hit": indexes_hit,
             "indexes_count": len(indexes_hit),
+            "lane_counts": lane_counts,
+            "hostile_snippets_count": len(hostile_snippets),
             "prior_memory_hits": len(prior_mems),
             "live_discovered_urls": len(discovered_meta),
             "urls_deduped": len(dedup_urls),

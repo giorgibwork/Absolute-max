@@ -102,12 +102,12 @@ def update_anchor_from_tool(
     anc = load_anchor(conv_id, paths)
     blob = " ".join(
         str(args.get(k) or "")
-        for k in ("Path", "CommandLine", "command", "uri", "url", "text", "Prompt")
+        for k in ("Path", "TargetFile", "CommandLine", "command", "uri", "url", "text", "Prompt")
     )
 
-    # Track written/edited files verbatim (never paraphrased)
-    fpath = str(args.get("Path") or "").strip()
-    if fpath and tool in ("write_file", "edit_file"):
+    # Track written/edited files verbatim (never paraphrased; supports both CLI & App tool schemas)
+    fpath = str(args.get("Path") or args.get("TargetFile") or "").strip()
+    if fpath and tool in ("write_file", "edit_file", "write_to_file", "replace_file_content", "multi_replace_file_content"):
         _dedup_push(anc["files_written"], fpath)
 
     for m in PATH_RX.findall(blob):

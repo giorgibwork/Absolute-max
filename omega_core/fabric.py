@@ -19,90 +19,95 @@ from typing import Any, Callable
 from . import OmegaPaths, ensure_dirs, get_paths, tune_sqlite
 
 DEFAULT_CATALOG: list[dict[str, Any]] = [
+    {"model_id": "gemini-4-carbon-high", "provider_id": "antigravity", "family": "gemini-carbon", "roles": ["security_audit", "adversarial_review", "deep_arch", "max_reasoning"], "billing_status": "free"},
+    {"model_id": "gemini-4-carbon-medium", "provider_id": "antigravity", "family": "gemini-carbon", "roles": ["deep_arch", "security_audit", "coding"], "billing_status": "free"},
+    {"model_id": "gemini-4-carbon-low", "provider_id": "antigravity", "family": "gemini-carbon", "roles": ["general", "coding"], "billing_status": "free"},
     {"model_id": "gemini-4-neon-xhigh", "provider_id": "antigravity", "family": "gemini-neon", "roles": ["deep_arch", "max_reasoning", "security_audit", "coding"], "billing_status": "free"},
     {"model_id": "gemini-4-neon-high", "provider_id": "antigravity", "family": "gemini-neon", "roles": ["deep_arch", "coding"], "billing_status": "free"},
     {"model_id": "gemini-4-neon-medium", "provider_id": "antigravity", "family": "gemini-neon", "roles": ["coding", "general"], "billing_status": "free"},
     {"model_id": "gemini-4-neon-low", "provider_id": "antigravity", "family": "gemini-neon", "roles": ["fast_default", "general"], "billing_status": "free"},
-    {"model_id": "gemini-4-argon-high", "provider_id": "antigravity", "family": "gemini-argon", "roles": ["adversarial_review", "security_audit", "deep_arch", "argon_pool"], "billing_status": "free"},
-    {"model_id": "gemini-4-argon-medium", "provider_id": "antigravity", "family": "gemini-argon", "roles": ["general", "argon_pool"], "billing_status": "free"},
-    {"model_id": "gemini-4-argon-low", "provider_id": "antigravity", "family": "gemini-argon", "roles": ["fast_default", "argon_pool"], "billing_status": "free"},
     {"model_id": "gemini-4-hydrogen-xhigh", "provider_id": "antigravity", "family": "gemini-hydrogen", "roles": ["judge", "deep_arch", "coding"], "billing_status": "free"},
     {"model_id": "gemini-4-hydrogen-high", "provider_id": "antigravity", "family": "gemini-hydrogen", "roles": ["coding", "general"], "billing_status": "free"},
     {"model_id": "gemini-4-hydrogen-medium", "provider_id": "antigravity", "family": "gemini-hydrogen", "roles": ["general", "utility"], "billing_status": "free"},
     {"model_id": "gemini-4-hydrogen-low", "provider_id": "antigravity", "family": "gemini-hydrogen", "roles": ["fast_default", "utility"], "billing_status": "free"},
-    {"model_id": "gemini-pro-orchestrator-neon", "provider_id": "antigravity", "family": "gemini-orchestrator", "roles": ["orchestrator", "research"], "billing_status": "free"},
-    {"model_id": "gemini-pro-orchestrator-g1-pro", "provider_id": "antigravity", "family": "gemini-argon", "roles": ["orchestrator", "research", "argon_pool"], "billing_status": "free"},
-    {"model_id": "gemini-3.8-flash-high", "provider_id": "antigravity", "family": "gemini-flash", "roles": ["fast_reasoning", "utility"], "billing_status": "free"},
-    {"model_id": "gemini-3.8-flash-medium", "provider_id": "antigravity", "family": "gemini-flash", "roles": ["fast_default", "utility"], "billing_status": "free"},
-    {"model_id": "gemini-3.8-flash-low", "provider_id": "antigravity", "family": "gemini-flash", "roles": ["fast_default", "ultra_fast"], "billing_status": "free"},
+    {"model_id": "gemini-3.5-flash-lite-high", "provider_id": "antigravity", "family": "gemini-flash-lite", "roles": ["fast_reasoning", "utility"], "billing_status": "free"},
+    {"model_id": "gemini-3.5-flash-lite-medium", "provider_id": "antigravity", "family": "gemini-flash-lite", "roles": ["fast_default", "utility"], "billing_status": "free"},
+    {"model_id": "gemini-3.5-flash-lite-low", "provider_id": "antigravity", "family": "gemini-flash-lite", "roles": ["fast_default", "ultra_fast"], "billing_status": "free"},
+    {"model_id": "gemini-3.5-flash-lite-minimal", "provider_id": "antigravity", "family": "gemini-flash-lite", "roles": ["ultra_fast", "classifier"], "billing_status": "free"},
+    {"model_id": "gemini-pro-orchestrator-neon", "provider_id": "antigravity", "family": "gemini-orchestrator", "roles": ["orchestrator", "research", "coding"], "billing_status": "free"},
+    {"model_id": "gemini-pro-orchestrator-carbon", "provider_id": "antigravity", "family": "gemini-orchestrator", "roles": ["orchestrator", "deep_arch", "security_audit"], "billing_status": "free"},
 ]
 
 ROUTE_RULES: list[tuple[str, re.Pattern[str], list[str]]] = [
     (
         "security_audit",
         re.compile(r"\b(?:audit|security|verify|adversarial|red[- ]?team|hostile|injection)\b", re.IGNORECASE),
-        ["gemini-4-argon-high", "gemini-4-neon-xhigh", "gemini-4-hydrogen-xhigh", "gemini-4-neon-high"],
+        ["gemini-4-carbon-high", "gemini-4-neon-xhigh", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-medium"],
     ),
     (
         "deep_arch",
         re.compile(r"\b(?:architect|refactor|debug|patch|complex|multi[- ]?file|migration)\b", re.IGNORECASE),
-        ["gemini-4-neon-xhigh", "gemini-4-neon-high", "gemini-4-argon-high", "gemini-4-hydrogen-high"],
+        ["gemini-4-neon-xhigh", "gemini-4-carbon-high", "gemini-4-neon-high", "gemini-4-hydrogen-high"],
     ),
     (
         "orchestrator",
         re.compile(r"\b(?:swarm|orchestrate|coordinate|maximize|optimize|research|benchmark)\b", re.IGNORECASE),
-        ["gemini-pro-orchestrator-neon", "gemini-pro-orchestrator-g1-pro", "gemini-4-neon-xhigh", "gemini-4-argon-high"],
+        ["gemini-pro-orchestrator-neon", "gemini-pro-orchestrator-carbon", "gemini-4-neon-xhigh", "gemini-4-carbon-high"],
     ),
     (
         "fast_default",
         re.compile(r".*"),
-        ["gemini-4-hydrogen-low", "gemini-3.8-flash-low", "gemini-4-argon-low", "gemini-4-neon-low"],
+        ["gemini-4-hydrogen-low", "gemini-3.5-flash-lite-low", "gemini-4-hydrogen-medium", "gemini-4-neon-low"],
     ),
 ]
 
+DEPRECATED_GEMINI_SLUGS = ("argon", "3.8-flash", "orchestrator-g1")
+
 
 def is_gemini_antigravity_model(model_id: str) -> bool:
-    """Strict Gemini + Antigravity router policy: exclude all third-party/non-Gemini models."""
+    """Strict Gemini + Antigravity router policy (Nov 30, 2026+): exclude third-party & sunsetting models."""
     m = (model_id or "").strip().lower()
+    if any(dep in m for dep in DEPRECATED_GEMINI_SLUGS):
+        return False
     return m.startswith("gemini-") or "orchestrator" in m
 
 
 def infer_family(model_id: str) -> str:
     m = model_id.lower()
-    if "orchestrator-g1" in m or "argon" in m:
-        return "gemini-argon"
     if "orchestrator" in m:
         return "gemini-orchestrator"
+    if "carbon" in m:
+        return "gemini-carbon"
     if "neon" in m:
         return "gemini-neon"
     if "hydrogen" in m:
         return "gemini-hydrogen"
-    if "flash" in m:
-        return "gemini-flash"
+    if "flash-lite" in m or "flash" in m:
+        return "gemini-flash-lite"
     return "gemini-other"
 
 
 def infer_base_model(model_id: str) -> str:
-    """Collapse effort-tier suffixes (-low/-medium/-high/-xhigh) into the real base model name."""
+    """Collapse effort-tier suffixes (-minimal/-low/-medium/-high/-xhigh) into the real base model name."""
     m = model_id.strip().lower()
-    if m == "gemini-pro-orchestrator-g1-pro":
-        return "orchestrator-argon"
+    if m == "gemini-pro-orchestrator-carbon":
+        return "orchestrator-carbon"
     if m == "gemini-pro-orchestrator-neon":
         return "orchestrator-neon"
-    return re.sub(r"-(?:xhigh|high|medium|low)$", "", m)
+    return re.sub(r"-(?:xhigh|high|medium|low|minimal)$", "", m)
 
 
 def infer_effort_tier(model_id: str) -> str:
-    m = re.search(r"-(xhigh|high|medium|low)$", model_id.strip().lower())
+    m = re.search(r"-(xhigh|high|medium|low|minimal)$", model_id.strip().lower())
     return m.group(1) if m else "default"
 
 
 def infer_quota_pool(model_id: str) -> str:
-    """Match the 2 pure Gemini Antigravity quota pools: gemini_models, gemini_argon."""
+    """Group pure Gemini 4 endpoints into frontier (Carbon/Neon/Orchestrator) vs fast (Hydrogen/Flash-Lite) tiers."""
     m = model_id.lower()
-    if "argon" in m or "orchestrator-g1" in m:
-        return "gemini_argon"
-    return "gemini_models"
+    if any(k in m for k in ("carbon", "neon", "orchestrator")):
+        return "gemini_frontier"
+    return "gemini_fast"
 
 
 def discover_agy_models(timeout_s: int = 8) -> list[dict[str, str]]:
@@ -170,9 +175,21 @@ def _connect(paths: OmegaPaths) -> sqlite3.Connection:
         );
         """
     )
-    # Enforce strict Gemini + Antigravity policy on existing DBs
+    # Migrate telemetry columns for cache_read_tokens & thinking_tokens on existing DBs
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(resource_usage)").fetchall()}
+    if "cache_read_tokens" not in cols:
+        conn.execute("ALTER TABLE resource_usage ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0")
+    if "thinking_tokens" not in cols:
+        conn.execute("ALTER TABLE resource_usage ADD COLUMN thinking_tokens INTEGER NOT NULL DEFAULT 0")
+    # Enforce strict Gemini 4 + Antigravity policy on existing DBs (purge third-party & sunsetting models)
     conn.execute(
-        "DELETE FROM model_qualifications WHERE lower(model_id) NOT LIKE 'gemini-%' AND lower(model_id) NOT LIKE '%orchestrator%'"
+        """
+        DELETE FROM model_qualifications
+        WHERE (lower(model_id) NOT LIKE 'gemini-%' AND lower(model_id) NOT LIKE '%orchestrator%')
+           OR lower(model_id) LIKE '%argon%'
+           OR lower(model_id) LIKE '%3.8-flash%'
+           OR lower(model_id) LIKE '%orchestrator-g1%'
+        """
     )
     for item in DEFAULT_CATALOG:
         conn.execute(
@@ -193,19 +210,43 @@ def _connect(paths: OmegaPaths) -> sqlite3.Connection:
     return conn
 
 
-def invoke_agy(model_id: str, prompt: str, timeout_s: int = 25) -> dict[str, Any]:
-    """Invoke a model through agy CLI with bounded timeout and clean output filtering."""
+def parse_agy_json_envelope(stdout: str) -> dict[str, Any]:
+    """Parse `agy -p --output-format json` envelope (response, structured_output, cache_read_tokens, thinking_tokens)."""
+    lines = [ln for ln in (stdout or "").splitlines() if not ln.startswith("ERROR: logging before google.Init:")]
+    raw = "\n".join(lines).strip()
+    if not raw:
+        return {"text": "", "structured_output": None, "usage": {}}
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict) and ("response" in obj or "structured_output" in obj):
+            return {
+                "text": str(obj.get("response") or "").strip(),
+                "structured_output": obj.get("structured_output"),
+                "usage": obj.get("usage") if isinstance(obj.get("usage"), dict) else {},
+                "status": str(obj.get("status") or ""),
+            }
+    except json.JSONDecodeError:
+        pass
+    return {"text": raw, "structured_output": None, "usage": {}}
+
+
+def invoke_agy(model_id: str, prompt: str, timeout_s: int = 25, json_schema: str | dict[str, Any] | None = None) -> dict[str, Any]:
+    """Invoke a Gemini model via `agy -p --output-format json` with optional --json-schema and token/cache telemetry."""
     t0 = time.monotonic()
     cmd = [
         "agy",
         "--model",
         model_id,
+        "--output-format",
+        "json",
         "--disable-slash-commands",
         "--print-timeout",
         f"{timeout_s}s",
-        "-p",
-        prompt,
     ]
+    if json_schema is not None:
+        schema_arg = json.dumps(json_schema) if isinstance(json_schema, dict) else str(json_schema)
+        cmd += ["--json-schema", schema_arg]
+    cmd += ["-p", prompt]
     try:
         res = subprocess.run(
             cmd,
@@ -222,19 +263,19 @@ def invoke_agy(model_id: str, prompt: str, timeout_s: int = 25) -> dict[str, Any
                 "rc": 401,
                 "latency_ms": elapsed_ms,
                 "text": "",
+                "structured_output": None,
+                "usage": {},
                 "error": "agy_cli_auth_required: run `agy` interactively once to sign in, or use native AntiGem subagents",
             }
-        lines = [
-            ln
-            for ln in (res.stdout or "").splitlines()
-            if not ln.startswith("ERROR: logging before google.Init:")
-        ]
-        txt = "\n".join(lines).strip()
+        parsed = parse_agy_json_envelope(res.stdout or "")
+        txt = parsed["text"]
         return {
-            "ok": res.returncode == 0 and len(txt) > 0,
+            "ok": res.returncode == 0 and (len(txt) > 0 or parsed["structured_output"] is not None),
             "rc": res.returncode,
             "latency_ms": elapsed_ms,
             "text": txt,
+            "structured_output": parsed["structured_output"],
+            "usage": parsed["usage"],
             "error": (res.stderr or "")[:300],
         }
     except subprocess.TimeoutExpired:
@@ -243,10 +284,12 @@ def invoke_agy(model_id: str, prompt: str, timeout_s: int = 25) -> dict[str, Any
             "rc": -1,
             "latency_ms": round((time.monotonic() - t0) * 1000.0, 1),
             "text": "",
+            "structured_output": None,
+            "usage": {},
             "error": f"timeout_after_{timeout_s}s",
         }
     except FileNotFoundError:
-        return {"ok": False, "rc": 127, "latency_ms": 0.0, "text": "", "error": "agy_not_found"}
+        return {"ok": False, "rc": 127, "latency_ms": 0.0, "text": "", "structured_output": None, "usage": {}, "error": "agy_not_found"}
 
 
 class IntelligenceFabric:
@@ -387,7 +430,7 @@ class IntelligenceFabric:
             conn.close()
 
     def list_base_models(self) -> list[dict[str, Any]]:
-        """Group effort-tier variants into true distinct base models (e.g. 9 base models, 23 effort endpoints)."""
+        """Group effort-tier variants into true distinct Gemini base models (6 base models, 17 effort endpoints)."""
         grouped: dict[str, dict[str, Any]] = {}
         for m in self.list_models():
             bm = m["base_model"]
@@ -416,7 +459,7 @@ class IntelligenceFabric:
         """Select ordered primary + fallback model chain preferring QUALIFIED models."""
         ex = exclude or set()
         route_name = "fast_default"
-        preferred = ["gemini-4-hydrogen-low", "gemini-4-neon-high", "gemini-4-argon-high"]
+        preferred = ["gemini-4-hydrogen-low", "gemini-4-neon-high", "gemini-4-carbon-high"]
         for name, rx, chain in ROUTE_RULES:
             if rx.search(task_text):
                 route_name = name
@@ -453,6 +496,7 @@ class IntelligenceFabric:
 
         for mid in chain:
             res = self.invoker(mid, prompt, timeout_s)
+            usage = res.get("usage") if isinstance(res.get("usage"), dict) else {}
             self._log_usage(
                 mission_id=mission_id,
                 route=sel["route"],
@@ -462,6 +506,8 @@ class IntelligenceFabric:
                 prompt_chars=len(prompt),
                 response_chars=len(res.get("text", "")),
                 error=str(res.get("error", "")),
+                cache_read_tokens=int(usage.get("cache_read_tokens") or 0),
+                thinking_tokens=int(usage.get("thinking_tokens") or 0),
             )
             attempts.append({"model_id": mid, "ok": res["ok"], "latency_ms": res["latency_ms"], "error": res.get("error", "")})
             if res["ok"]:
@@ -496,16 +542,30 @@ class IntelligenceFabric:
         prompt_chars: int,
         response_chars: int,
         error: str,
+        cache_read_tokens: int = 0,
+        thinking_tokens: int = 0,
     ) -> None:
         conn = _connect(self.paths)
         try:
             conn.execute(
                 """
                 INSERT INTO resource_usage
-                    (ts, mission_id, route, model_id, ok, latency_ms, prompt_chars, response_chars, cost_usd, error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?)
+                    (ts, mission_id, route, model_id, ok, latency_ms, prompt_chars, response_chars, cost_usd, error, cache_read_tokens, thinking_tokens)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?)
                 """,
-                (int(time.time()), mission_id, route, model_id, 1 if ok else 0, latency_ms, prompt_chars, response_chars, error[:240]),
+                (
+                    int(time.time()),
+                    mission_id,
+                    route,
+                    model_id,
+                    1 if ok else 0,
+                    latency_ms,
+                    prompt_chars,
+                    response_chars,
+                    error[:240],
+                    int(cache_read_tokens),
+                    int(thinking_tokens),
+                ),
             )
             conn.commit()
         finally:

@@ -18,7 +18,7 @@ import time
 import uuid
 from typing import Any
 
-from . import R0_READONLY, R2_WORKSPACE, R3_EXTERNAL_APPROVED, OmegaPaths, ensure_dirs, get_paths, tune_sqlite
+from . import R0_READONLY, R2_WORKSPACE, R3_EXTERNAL_APPROVED, OmegaPaths, ensure_dirs, get_paths, safe_fts_query, tune_sqlite
 from .kernel import screen_memory_write
 from .mission import MissionKernel
 
@@ -284,6 +284,7 @@ class KnowledgeFabric:
                 params.append(fam)
         where_extra = " AND ".join(clauses)
 
+        fts_q = safe_fts_query(q, mode="OR", max_terms=6)
         conn = connect_vault(self.paths)
         try:
             try:
@@ -298,9 +299,11 @@ class KnowledgeFabric:
                     ORDER BY bm25(memories_fts) * (1.25 - 0.5 * m.utility_score), m.utility_score DESC, m.key ASC
                     LIMIT ?
                     """,
-                    [q, *params, int(limit)],
+                    [fts_q or q, *params, int(limit)],
                 ).fetchall()
             except sqlite3.OperationalError:
+                rows = []
+            if not rows:
                 like = f"%{q}%"
                 rows = conn.execute(
                     f"""

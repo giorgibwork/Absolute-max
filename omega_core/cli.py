@@ -11,10 +11,10 @@ import sys
 _REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 _VENV_DIR = os.path.join(_REPO, ".venv")
 _VENV_PY = os.path.join(_VENV_DIR, "bin", "python3")
-# Auto-upgrade to isolated .venv for omni commands (crawl/yt/doc) while keeping fast system python for everything else
+# Auto-upgrade to isolated .venv for omni commands (crawl/feed/yt/doc) while keeping fast system python for everything else
 if (
     len(sys.argv) > 1
-    and sys.argv[1] in ("crawl", "yt", "doc")
+    and sys.argv[1] in ("crawl", "feed", "yt", "doc")
     and os.path.isfile(_VENV_PY)
     and os.path.realpath(sys.prefix) != os.path.realpath(_VENV_DIR)
 ):
@@ -35,7 +35,7 @@ from omega_core.kernel import evaluate_tool_call
 from omega_core.memory import KnowledgeFabric
 from omega_core.mission import MissionKernel
 from omega_core.obsidian import DEFAULT_VAULT_DIR, ObsidianSync
-from omega_core.omni import bulk_crawl, fetch_youtube_transcript, query_local_corpus, read_document
+from omega_core.omni import bulk_crawl, fetch_youtube_transcript, ingest_ai_pulse, query_local_corpus, read_document
 from omega_core.research import ResearchEngine
 from omega_core.rtk import generate_handoff, run_compressed
 from omega_core.suite import run_suite
@@ -311,6 +311,10 @@ def cmd_rtk(args) -> None:
     print(res["text"])
     print(f"[RTK rc={res['rc']} ms={res['ms']} saved={res['saved_pct']}% ({res['orig_chars']}->{res['compressed_chars']} chars)]")
     sys.exit(res["rc"])
+
+
+def cmd_feed(args) -> None:
+    _jprint(ingest_ai_pulse(query=args.query, limit=args.limit))
 
 
 def cmd_research(args) -> None:
@@ -594,6 +598,12 @@ def build_parser() -> argparse.ArgumentParser:
     pcr.add_argument("--top", type=int, default=8)
     pcr.add_argument("--query-only", action="store_true", help="Query already-crawled local SQLite FTS5 corpus (<5ms, 0 network)")
     pcr.set_defaults(func=cmd_crawl)
+
+    # feed (live AI X/Twitter digest + HF Daily Papers + Lobsters + Simon Willison + Google AI + ZH/RU/KR pulse)
+    pfd = sub.add_parser("feed", help="Ingest live AI X/Twitter digest & multilingual practitioner feeds into local FTS5 (0 LLM tokens)")
+    pfd.add_argument("--query", default="", help="Optional filter query across freshly ingested + local corpus")
+    pfd.add_argument("--limit", type=int, default=12)
+    pfd.set_defaults(func=cmd_feed)
 
     # yt (instant zero-download YouTube transcript)
     pyt = sub.add_parser("yt", help="Fetch instant timestamped YouTube captions (<1.5s, 0 download)")

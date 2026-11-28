@@ -14,10 +14,16 @@ if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
 from omega_core import ensure_dirs, get_paths
+from omega_core.compact_anchor import update_anchor_from_tool
 from omega_core.memory import KnowledgeFabric
 
 MAX_AUDIT_LINES = 500
-WEB_RX = re.compile(r"\b(?:web_gather\.py|deep_crawl\.py|curl|browser_)\b", re.IGNORECASE)
+WEB_RX = re.compile(
+    r"\b(?:web_gather\.py|deep_crawl\.py|search_web|read_url_content|omega\s+(?:crawl|research|feed)|curl|browser_)\b",
+    re.IGNORECASE,
+)
+TEST_PASS_RX = re.compile(r"\b(?:unittest|pytest|omega\s+suite)\b", re.IGNORECASE)
+WRITE_TOOL_NAMES = {"write_file", "edit_file", "write_to_file", "replace_file_content", "multi_replace_file_content"}
 
 
 def _last_hash(audit_path: str) -> str:
@@ -50,9 +56,15 @@ def main() -> None:
     tc = payload.get("toolCall") or {}
     tool = str(tc.get("name") or "")
     args = tc.get("args") or {}
-    cmd = str(args.get("CommandLine") or args.get("command") or args.get("Path") or "")
+    cmd = str(args.get("CommandLine") or args.get("command") or args.get("Path") or args.get("TargetFile") or "")
     conv_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(payload.get("conversationId") or "default"))[:48] or "default"
     err = str(payload.get("error") or "")
+
+    # Populate lossless post-compact anchor (<5ms, 0 LLM tokens) so /compact never loses verbatim paths/URLs/fails
+    try:
+        update_anchor_from_tool(conv_id, tool, args, ok=not bool(err), err=err, paths=paths)
+    except Exception:
+        pass
 
     cmd_hash = hashlib.sha256(f"{tool}:{cmd}".encode("utf-8")).hexdigest()[:16]
     prev = _last_hash(paths.audit_log)
@@ -92,9 +104,16 @@ def main() -> None:
     except Exception:
         pass
 
-    # Update per-session SPIDES taint + repeat-failure tracker
+    # Update per-session SPIDES taint + repeat-failure tracker + Stop-hook verification state
     st_path = os.path.join(paths.state_dir, f"{conv_id}.json")
-    state = {"tainted_web": False, "last_fail_hash": "", "fail_streak": 0}
+    state = {
+        "tainted_web": False,
+        "last_fail_hash": "",
+        "fail_streak": 0,
+        "code_edited": False,
+        "tests_passed": False,
+        "stop_continues": 0,
+    }
     if os.path.exists(st_path):
         try:
             with open(st_path, "r", encoding="utf-8") as sf:
@@ -104,6 +123,14 @@ def main() -> None:
 
     if WEB_RX.search(tool) or WEB_RX.search(cmd):
         state["tainted_web"] = True
+    if tool in WRITE_TOOL_NAMES and cmd.endswith(".py") and not err:
+        state["code_edited"] = True
+        state["tests_passed"] = False
+        state["stop_continues"] = 0
+    if tool == "run_command" and not err and TEST_PASS_RX.search(cmd):
+        state["tests_passed"] = True
+        state["code_edited"] = False
+        state["stop_continues"] = 0
     if err:
         if state.get("last_fail_hash") == cmd_hash:
             state["fail_streak"] = int(state.get("fail_streak", 0)) + 1

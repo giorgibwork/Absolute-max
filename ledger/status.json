@@ -1,5 +1,5 @@
 {
-  "version": "7.0.0-apex",
+  "version": "8.0.0-apex",
   "host": "AntiGem-Android-POCO-F6-Pro",
   "updated_at": "2026-11-28",
   "constitution_status": "DRAFT_NOT_RATIFIED",
@@ -10,12 +10,12 @@
       "plane": "Control",
       "name": "Constitutional Kernel",
       "owner": "omega_core/kernel.py",
-      "adapters": ["adapters/antigem/pre_tool_guard.py", "~/.gemini/config/hooks.json"],
+      "adapters": ["adapters/antigem/pre_tool_guard.py", "adapters/antigem/stop_verify.py", "~/.gemini/config/hooks.json"],
       "test_refs": ["tests/test_omega_core.py", "omega_core/suite.py#Mission-H"],
       "status": "QUALIFIED",
       "known_limitations": [
         "Supreme Constitution v1.0 remains draft until operator explicitly ratifies.",
-        "Live AntiGem config.json retains EAGER auto-execution for local tools; consequential/spend/destructive actions are intercepted by PreToolUse hook."
+        "PreToolUse enforces force_ask on REV3/REV4 privilege mutations and auto_approve on strictly safe single-command REV0 diagnostics; Stop hook enforces bounded verification."
       ]
     },
     {
@@ -75,7 +75,7 @@
       "test_refs": ["omega_core/suite.py#Mission-E", "tests/test_omega_core.py#test_base_model_grouping_and_quota_pools"],
       "status": "QUALIFIED",
       "known_limitations": [
-        "Strictly pure Gemini + Antigravity (6 base models / 16 effort endpoints across 2 independent Gemini pools: gemini_models & gemini_argon; zero third-party models). Standalone nested `agy -p` calls require running `agy models` interactively once in terminal."
+        "Strictly pure Gemini 4 + Antigravity (6 base models / 17 effort endpoints across 2 Gemini pools: gemini_frontier & gemini_fast; retired Nov 30 sunsetting argon/3.8-flash; zero third-party models). Standalone nested `agy -p` calls require running `agy models` interactively once in terminal."
       ]
     },
     {

@@ -7,9 +7,10 @@ Evolution Lab runs via the OMEGA_HOME environment variable.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 
-VERSION = "7.0.0-apex"
+VERSION = "8.0.0-apex"
 
 # Capability Rings (Weakest-Agent Safety Invariant)
 R0_READONLY = 0
@@ -99,3 +100,46 @@ def tune_sqlite(conn) -> None:
     conn.execute("PRAGMA mmap_size=67108864;")
     conn.execute("PRAGMA cache_size=-8000;")
     conn.execute("PRAGMA busy_timeout=5000;")
+
+
+_LATIN_CYR_GEO_RX = re.compile(r"[A-Za-z0-9_\u0400-\u04ff\u10a0-\u10ff][A-Za-z0-9._\-\u0400-\u04ff\u10a0-\u10ff]{1,}")
+_CJK_RUN_RX = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]{2,}")
+
+
+def tokenize_multilingual(text: str, *, min_latin: int = 2, min_cjk: int = 2, max_tokens: int = 24) -> list[str]:
+    """Extract Latin, CJK (ZH/JA/KO), Cyrillic (RU), and Georgian tokens without dropping non-ASCII scripts."""
+    raw = (text or "").strip()
+    if not raw:
+        return []
+    out: list[str] = []
+    for m in _LATIN_CYR_GEO_RX.findall(raw):
+        cleaned = m.strip("._-")
+        if len(cleaned) >= min_latin:
+            out.append(cleaned)
+    for run in _CJK_RUN_RX.findall(raw):
+        if len(run) >= min_cjk:
+            out.append(run)
+            if len(run) >= 4:
+                # Emit overlapping 2-char CJK bigrams so unspaced Chinese/Japanese phrases match cleanly
+                for i in range(0, min(len(run) - 1, 8)):
+                    out.append(run[i : i + 2])
+    return list(dict.fromkeys(out))[:max_tokens]
+
+
+def safe_fts_query(raw: str, *, mode: str = "OR", max_terms: int = 6) -> str:
+    """Build a safe SQLite FTS5 MATCH expression that quotes hyphens/dots/non-ASCII cleanly."""
+    q = (raw or "").strip()
+    if not q:
+        return ""
+    # Preserve explicit FTS boolean syntax if caller already quoted or structured it safely
+    if ('"' in q or "*" in q) and not re.search(r"[?!;()]", q):
+        return q
+    if (" OR " in q or " AND " in q) and not re.search(r"[a-zA-Z0-9]-[a-zA-Z0-9]", q):
+        return q
+    toks = tokenize_multilingual(q, min_latin=2, min_cjk=2, max_tokens=max_terms)
+    if not toks:
+        escaped = q.replace('"', "")
+        return f'"{escaped}"' if escaped else ""
+    quoted = [f'"{t.replace(chr(34), "")}"' for t in toks[:max_terms]]
+    joiner = " AND " if mode.upper() == "AND" else " OR "
+    return joiner.join(quoted)

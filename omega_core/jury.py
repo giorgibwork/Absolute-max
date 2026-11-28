@@ -1,16 +1,13 @@
-"""Pure Gemini + Antigravity Parallel Asymmetric Jury + Dual-Pool Spillover Engine.
+"""Pure Gemini 4 + Antigravity Parallel Asymmetric Jury Engine (Nov 30, 2026+ Roster).
 
-Maximizes Gemini capability by splitting adversarial roles across 3 distinct Gemini
-architectures and both independent Antigravity Gemini quota pools, with Builder &
-Hostile Prosecutor executing IN PARALLEL (cutting wall-clock latency ~50%):
-- Builder (`gemini-4-neon-xhigh`, gemini_models pool): synthesizes strongest mechanism
-  from primary + Chinese + English evidence.
-- Hostile Prosecutor (`gemini-4-argon-high`, gemini_argon pool): receives ONLY bug
-  reports, GitHub issues, HN critiques, and failure evidence to red-team without
-  confirmation bias.
+Maximizes Gemini capability by splitting adversarial roles across 3 distinct Gemini 4
+architectures with Builder & Hostile Prosecutor executing IN PARALLEL (~50% lower latency):
+- Builder (`gemini-4-neon-xhigh`): synthesizes strongest mechanism from primary + multilingual evidence.
+- Hostile Prosecutor (`gemini-4-carbon-high`): receives ONLY bug reports, GitHub issues,
+  HN/Lobsters critiques, and failure evidence to red-team without confirmation bias.
 - Evidence Judge (`gemini-4-hydrogen-xhigh` / `gemini-pro-orchestrator-neon`):
   reconciles Builder vs Prosecutor strictly on fetched evidence, tags [ALPHA / NON-CONSENSUS]
-  insights, preserves unresolved conflicts, and enforces `non_consensus_gate.py`.
+  insights, preserves unresolved conflicts, and enforces `non_consensus_gate.py --strict`.
 """
 from __future__ import annotations
 
@@ -38,7 +35,7 @@ class AsymmetricJury:
         positive_evidence: str,
         hostile_evidence: str,
         builder_model: str = "gemini-4-neon-xhigh",
-        prosecutor_model: str = "gemini-4-argon-high",
+        prosecutor_model: str = "gemini-4-carbon-high",
         judge_model: str = "gemini-4-hydrogen-xhigh",
         timeout_s: int = 45,
         export_obsidian: bool = False,
@@ -72,7 +69,7 @@ class AsymmetricJury:
         def _run_prosecutor() -> tuple[str, dict[str, Any]]:
             res = self.fabric.invoker(prosecutor_model, p_prompt, timeout_s)
             if not res.get("ok"):
-                return "gemini-pro-orchestrator-g1-pro", self.fabric.invoker("gemini-pro-orchestrator-g1-pro", p_prompt, timeout_s)
+                return "gemini-4-carbon-medium", self.fabric.invoker("gemini-4-carbon-medium", p_prompt, timeout_s)
             return prosecutor_model, res
 
         # Run Builder & Hostile Prosecutor in parallel across independent Gemini quota pools
@@ -108,7 +105,7 @@ class AsymmetricJury:
             try:
                 with open(tmp_md, "w", encoding="utf-8") as f:
                     f.write(final_md + "\n")
-                gr = subprocess.run(["python3", gate_py, tmp_md], capture_output=True, text=True, timeout=10)
+                gr = subprocess.run(["python3", gate_py, tmp_md, "--strict"], capture_output=True, text=True, timeout=10)
                 gate_passed = gr.returncode == 0
             finally:
                 if os.path.exists(tmp_md):

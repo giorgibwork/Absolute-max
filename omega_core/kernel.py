@@ -32,6 +32,7 @@ from . import (
     OmegaPaths,
     ensure_dirs,
     get_paths,
+    tune_sqlite,
 )
 
 # 1. Always-DENY destructive / host-unsafe patterns (word-bounded)
@@ -130,12 +131,18 @@ MUTATING_CMD_RX = re.compile(
     r"(?:>>?|\b(?:rm|mv|cp|mkdir|touch|chmod|chown|git\s+(?:commit|push|reset|checkout|clean)|python3\s+-c\s+.*open\([^)]*['\"][wa]['\"])\b)"
 )
 
-MUTATING_TOOLS = {"write_file", "edit_file", "run_command", "run_workflow"}
+WRITE_TOOLS = {"write_file", "edit_file", "write_to_file", "replace_file_content", "multi_replace_file_content"}
+MUTATING_TOOLS = WRITE_TOOLS | {"run_command", "run_workflow"}
+
+SHELL_CHAIN_RX = re.compile(r"[;&|><`$()]|\n")
+SAFE_AUTO_APPROVE_RX = re.compile(
+    r"^(?:omega\s+(?:dashboard|status|feed|code\s+(?:find|callers|outline)|crawl\b[^\n]*--query-only)|git\s+(?:status|diff|log|rev-parse|branch))\b"
+)
 
 
 @dataclass
 class GateDecision:
-    decision: str  # allow | ask | deny
+    decision: str  # allow | auto_approve | ask | force_ask | deny
     action_class: str
     reason: str
     ring_required: int = R0_READONLY
@@ -144,7 +151,7 @@ class GateDecision:
 
     def to_hook_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {"decision": self.decision}
-        if self.decision != "allow":
+        if self.decision not in ("allow", "auto_approve"):
             out["reason"] = self.reason
         return out
 
@@ -214,8 +221,7 @@ def screen_memory_write(
 def _init_delegation_table(paths: OmegaPaths) -> sqlite3.Connection:
     ensure_dirs(paths)
     conn = sqlite3.connect(paths.missions_db, timeout=5.0)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout=5000;")
+    tune_sqlite(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS delegation_log (
@@ -277,6 +283,7 @@ def _check_approved_ticket(paths: OmegaPaths, action_sig: str) -> str | None:
         return None
     try:
         conn = sqlite3.connect(paths.missions_db, timeout=2.0)
+        tune_sqlite(conn)
         row = conn.execute(
             """
             SELECT approval_id FROM approvals
@@ -350,10 +357,10 @@ def evaluate_tool_call(
         )
 
     cmd = str(args.get("CommandLine") or args.get("command") or "")
-    target_path = str(args.get("Path") or args.get("path") or "")
+    target_path = str(args.get("Path") or args.get("TargetFile") or args.get("path") or "")
 
-    # 1. File write/edit capability ring + secret/sandbox checks
-    if tool in ("write_file", "edit_file"):
+    # 1. File write/edit capability ring + secret/sandbox checks (supports CLI & App/IDE tool names)
+    if tool in WRITE_TOOLS:
         if caller_ring < R1_SANDBOX:
             return GateDecision(
                 decision="deny",
@@ -372,13 +379,20 @@ def evaluate_tool_call(
                     reason=f"Sandbox ring R1_SANDBOX blocked write outside sandbox/tmpdir: {target_path}",
                     ring_required=R2_WORKSPACE,
                 )
-        content = str(args.get("Content") or args.get("Replacement") or "")
+        content = str(
+            args.get("Content")
+            or args.get("CodeContent")
+            or args.get("Replacement")
+            or args.get("ReplacementContent")
+            or ""
+        )
         if TAINT_SINK_RX.search(target_path):
             return GateDecision(
-                decision="ask",
+                decision="force_ask",
                 action_class="PRIVILEGE_CHANGE",
-                reason=f"Write to sensitive credential path requires approval: {target_path}",
+                reason=f"REV3 write to sensitive credential path requires explicit un-cached approval: {target_path}",
                 ring_required=R3_EXTERNAL_APPROVED,
+                reversibility_class=REV3_HARD_TO_RECOVER,
             )
         sec_hits = scan_secrets(content)
         if sec_hits:
@@ -404,7 +418,9 @@ def evaluate_tool_call(
             if action_class == "SPEND":
                 return GateDecision("deny", action_class, reason, req_ring, reversibility_class=rev_cls)
             if autonomy_mode == "PREPARE_ONLY" or caller_ring < R3_EXTERNAL_APPROVED:
-                return GateDecision("ask", action_class, reason, req_ring, reversibility_class=rev_cls)
+                # REV3 privilege / Android uid 2000 mutations use `force_ask` so cached grants can never bypass them
+                dec_str = "force_ask" if action_class == "PRIVILEGE_CHANGE" else "ask"
+                return GateDecision(dec_str, action_class, reason, req_ring, reversibility_class=rev_cls)
 
         if req_ring > caller_ring:
             return GateDecision(
@@ -447,7 +463,18 @@ def evaluate_tool_call(
                         ring_required=R3_EXTERNAL_APPROVED,
                     )
 
-        return GateDecision("allow", action_class, reason, req_ring)
+        # Strictly safe single-command REV0 read-only diagnostics auto-approve cleanly (zero shell chaining!)
+        stripped_cmd = cmd.strip()
+        if (
+            action_class == "READ"
+            and caller_ring >= R2_WORKSPACE
+            and stripped_cmd
+            and not SHELL_CHAIN_RX.search(stripped_cmd)
+            and SAFE_AUTO_APPROVE_RX.match(stripped_cmd)
+        ):
+            return GateDecision("auto_approve", action_class, "REV0 read-only diagnostic auto-approved.", req_ring, reversibility_class=REV0_NO_EFFECT)
+
+        return GateDecision("allow", action_class, reason, req_ring, reversibility_class=rev_cls)
 
     # 3. Generic tool ring enforcement
     if tool in MUTATING_TOOLS and caller_ring < R1_SANDBOX:

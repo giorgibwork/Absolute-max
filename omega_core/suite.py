@@ -169,7 +169,7 @@ def run_suite(*, write_baseline_path: str | None = None) -> dict[str, Any]:
 
         def fake_invoker(model_id: str, prompt: str, timeout_s: int):
             calls.append(model_id)
-            if "argon" in model_id and "audit" in prompt:
+            if "carbon" in model_id and "audit" in prompt:
                 return {"ok": False, "rc": 1, "latency_ms": 12.0, "text": "", "error": "simulated_503"}
             return {
                 "ok": True,
@@ -180,12 +180,12 @@ def run_suite(*, write_baseline_path: str | None = None) -> dict[str, Any]:
             }
 
         fab = IntelligenceFabric(spaths, invoker=fake_invoker)
-        q_arg = fab.qualify_model("gemini-4-argon-high")
+        q_carb = fab.qualify_model("gemini-4-carbon-high")
         q_gem = fab.qualify_model("gemini-4-neon-xhigh")
-        # security_audit prefers gemini-4-argon-high first -> fails 503 -> spills over across pool to gemini-4-neon-xhigh
+        # security_audit prefers gemini-4-carbon-high first -> fails 503 -> spills over to gemini-4-neon-xhigh
         res = fab.execute_with_fallback("run hostile security audit", "audit this diff")
         ok = (
-            q_arg["qualification_state"] == "QUALIFIED"
+            q_carb["qualification_state"] == "QUALIFIED"
             and q_gem["qualification_state"] == "QUALIFIED"
             and res["ok"]
             and res["model_used"] == "gemini-4-neon-xhigh"
@@ -198,7 +198,7 @@ def run_suite(*, write_baseline_path: str | None = None) -> dict[str, Any]:
         # R2 parent delegates to R0 read-only researcher -> effective ring MUST be R0
         eff = delegate_ring("orchestrator", R2_WORKSPACE, "research_subagent", R0_READONLY, task_family="research", paths=spaths)
         d_write = evaluate_tool_call(
-            {"toolCall": {"name": "write_file", "args": {"Path": "/data/data/ai.antigem/files/home/x.txt", "Content": "hi"}}},
+            {"toolCall": {"name": "write_file", "args": {"Path": os.path.join(spaths.omega_home, "x.txt"), "Content": "hi"}}},
             caller_ring=eff,
             paths=spaths,
         )

@@ -15,7 +15,7 @@ import os
 import re
 from typing import Any
 
-from . import R2_WORKSPACE, OmegaPaths, ensure_dirs, get_paths
+from . import R2_WORKSPACE, OmegaPaths, ensure_dirs, get_paths, safe_fts_query, tokenize_multilingual
 from .compact_anchor import maybe_post_compact_message
 from .forge import SkillForge
 from .memory import KnowledgeFabric
@@ -38,6 +38,7 @@ JIT_STOP = {"the", "and", "for", "with", "what", "how", "can", "you", "our", "th
 HANDOFF_RX = re.compile(r"\b(?:handoff|wrap\s+up\s+for\s+new\s+chat|session\s+handoff|prepare\s+new\s+chat)\b", re.IGNORECASE)
 CRAWL_RX = re.compile(r"\b(?:scrape|crawl|bulk\s+crawl|mass\s+scrape|500\+\s+pages|youtube\s+transcript|transcript\s+of)\b", re.IGNORECASE)
 CODEGRAPH_RX = re.compile(r"\b(?:codegraph|call\s+graph|who\s+calls|find\s+callers|where\s+is\s+\w+\s+defined)\b", re.IGNORECASE)
+FEED_RX = re.compile(r"\b(?:x\s+feed|twitter\s+feed|ai\s+news|daily\s+pulse|ai\s+pulse|latest\s+ai\s+news|smol\s+ai)\b", re.IGNORECASE)
 
 DEEP_RESEARCH_RX = re.compile(
     r"\b(?:deep\s+research|dig\s+deep|full\s+breakdown|investigate\s+deeply|maximize|optimize|absolute\s+ceiling|eye\s+of\s+god|research\s+everything|comprehensive\s+research)\b",
@@ -117,6 +118,14 @@ def classify_user_intent(user_input: str) -> list[dict[str, str]]:
             {
                 "intent": "CODEGRAPH",
                 "directive": "[Omega->AST] Run `omega code find|callers <sym>` before opening whole files.",
+            }
+        )
+
+    if FEED_RX.search(txt):
+        routes.append(
+            {
+                "intent": "AI_FEED",
+                "directive": "[Omega->FEED] Run `omega feed` (0 tokens: smol.ai X/Twitter digest + HF Daily Papers + Lobsters + Simon Willison + Google AI + V2EX/Habr/GeekNews).",
             }
         )
 
@@ -222,17 +231,17 @@ def classify_user_intent(user_input: str) -> list[dict[str, str]]:
 
 
 def jit_hydrate_memories(user_input: str, paths: OmegaPaths, max_chars: int = 900) -> str:
-    """Zero-tool-call Pre-Turn JIT Context Hydration (JitMem + HiGram pattern)."""
-    if len(user_input.strip()) < 5:
+    """Zero-tool-call Multilingual Pre-Turn JIT Context + SkillForge Hydration (JitMem + HiGram pattern)."""
+    if len(user_input.strip()) < 2:
         return ""
-    terms = [w for w in re.findall(r"[A-Za-z0-9_]{3,}", user_input.lower()) if w not in JIT_STOP]
+    terms = [w for w in tokenize_multilingual(user_input, min_latin=3, min_cjk=2, max_tokens=10) if w.lower() not in JIT_STOP]
     for rx, syn in JIT_SYNONYMS:
         if rx.search(user_input) and syn not in terms:
             terms.insert(0, syn)
     if not terms:
         return ""
 
-    query = " OR ".join(dict.fromkeys(terms[:5]))
+    query = safe_fts_query(" ".join(dict.fromkeys(terms[:5])), mode="OR", max_terms=5)
     try:
         kf = KnowledgeFabric(paths)
         hits = kf.graph_search(query, caller_ring=R2_WORKSPACE, hops=1, limit=3)

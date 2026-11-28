@@ -120,14 +120,17 @@ class OmegaCoreTests(unittest.TestCase):
         fab = IntelligenceFabric(self.paths)
         variants = fab.list_models()
         bases = fab.list_base_models()
-        self.assertEqual(len(variants), 16)
+        self.assertEqual(len(variants), 17)
         self.assertEqual(len(bases), 6)
         pools = {b["quota_pool"] for b in bases}
-        self.assertEqual(pools, {"gemini_models", "gemini_argon"})
-        # Strict Gemini + Antigravity only invariant: zero third-party models in router/catalog
+        self.assertEqual(pools, {"gemini_frontier", "gemini_fast"})
+        # Strict Gemini 4 + Antigravity only invariant: zero third-party & zero sunsetting models
         for m in variants:
-            self.assertNotIn("claude", m["model_id"].lower())
-            self.assertNotIn("gpt", m["model_id"].lower())
+            mid = m["model_id"].lower()
+            self.assertNotIn("claude", mid)
+            self.assertNotIn("gpt", mid)
+            self.assertNotIn("argon", mid)
+            self.assertNotIn("3.8-flash", mid)
 
     def test_research_part_v_cache_dedup_and_date_sensitivity(self):
         from omega_core.research import ResearchEngine, is_date_sensitive
@@ -211,7 +214,7 @@ class OmegaCoreTests(unittest.TestCase):
         )
         self.assertTrue(jres["ok"])
         self.assertEqual(jres["builder_model"], "gemini-4-neon-xhigh")
-        self.assertEqual(jres["prosecutor_model"], "gemini-4-argon-high")
+        self.assertEqual(jres["prosecutor_model"], "gemini-4-carbon-high")
         self.assertEqual(jres["judge_model"], "gemini-4-hydrogen-xhigh")
 
         # Obsidian vault creation + 2-way inbox ingest + valid 10-color single-galaxy graph.json
@@ -329,7 +332,7 @@ class OmegaCoreTests(unittest.TestCase):
             {"toolCall": {"name": "run_command", "args": {"CommandLine": "rish -c 'settings put global anim_scale 0'"}}},
             paths=self.paths,
         )
-        self.assertEqual(d_adb.decision, "ask")
+        self.assertEqual(d_adb.decision, "force_ask")
         self.assertEqual(d_adb.reversibility_class, REV3_HARD_TO_RECOVER)
 
         d_rm = evaluate_tool_call(
@@ -467,6 +470,111 @@ class OmegaCoreTests(unittest.TestCase):
             score_source_authority("https://arxiv.org/abs/2611.22075"),
             score_source_authority("https://medium.com/random-blog"),
         )
+
+    def test_v80_multilingual_fts_hostile_lanes_carbon_telemetry_and_stop_hook(self):
+        import importlib.util
+        import sqlite3
+        from omega_core import safe_fts_query, tokenize_multilingual
+        from omega_core.codegraph import CodeGraph
+        from omega_core.compact_anchor import load_anchor, update_anchor_from_tool
+        from omega_core.fabric import parse_agy_json_envelope
+        from omega_core.omni import _bm25_top_hits, _corpus_conn, maybe_markdown_mirror_url
+        from omega_core.research import expand_japanese_query, expand_russian_query
+        from omega_core.router import classify_user_intent
+
+        # 1. Multilingual tokenizer + hyphenated/CJK/Cyrillic/Georgian safe FTS5 recall
+        toks = tokenize_multilingual("gemini-4-carbon 澎湃OS触控 армрестлинг ოპტიმიზაცია")
+        self.assertIn("gemini-4-carbon", toks)
+        self.assertIn("армрестлинг", toks)
+        self.assertIn("ოპტიმიზაცია", toks)
+        self.assertTrue(any("澎湃" in t for t in toks))
+        self.assertRegex(expand_japanese_query("Gemini agent cache"), r"[\u3040-\u30ff\u4e00-\u9fff]")
+        self.assertRegex(expand_russian_query("armwrestling pronation"), r"[\u0400-\u04ff]")
+
+        kf = KnowledgeFabric(self.paths)
+        kf.add_memory("models/carbon", "Use gemini-4-carbon for hostile security audits", task_family="global", global_override=True)
+        kf.add_memory("life/arm", "腕力训练 pronation и армрестлинг cable work", task_family="global", global_override=True)
+        self.assertTrue(any(r["key"] == "models/carbon" for r in kf.search_memory("gemini-4-carbon?")))
+        self.assertTrue(any(r["key"] == "life/arm" for r in kf.search_memory("腕力训练")))
+        self.assertTrue(any(r["key"] == "life/arm" for r in kf.search_memory("армрестлинг")))
+
+        # 2. Lane-diverse + domain-capped anti-consensus _bm25_top_hits + .md mirror fast-path
+        self.assertEqual(maybe_markdown_mirror_url("https://antigravity.google/docs/hooks"), "https://antigravity.google/docs/hooks.md")
+        self.assertIsNone(maybe_markdown_mirror_url("https://example.com/page"))
+
+        cdb = os.path.join(self.tmpdir, "corpus.db")
+        cc = _corpus_conn(cdb)
+        try:
+            sample = [
+                ("https://same.example.com/1", "ddg_en", "Gemini 4 harness guide 1", "", "Gemini 4 harness guide primary text", 100, "general"),
+                ("https://same.example.com/2", "ddg_en", "Gemini 4 harness guide 2", "", "Gemini 4 harness guide second text", 101, "general"),
+                ("https://same.example.com/3", "ddg_en", "Gemini 4 harness guide 3", "", "Gemini 4 harness guide third text", 102, "general"),
+                ("https://news.ycombinator.com/item?id=99", "hn_hostile_comment", "Gemini 4 harness regression", "", "Gemini 4 harness breaks under race condition", 103, "hostile"),
+                ("https://qiita.com/u/items/1", "qiita_jp(likes=50)", "Gemini 4 harness 実践", "", "Gemini 4 harness 日本語検証ベンチマーク", 104, "multilingual"),
+            ]
+            cc.executemany("INSERT INTO docs (url, source, title, published, text, fetched_at, lane) VALUES (?,?,?,?,?,?,?)", sample)
+            cc.commit()
+            hits = _bm25_top_hits(cc, "Gemini 4 harness", 4)
+            urls = [h[0] for h in hits]
+            self.assertIn("https://news.ycombinator.com/item?id=99", urls)
+            self.assertIn("https://qiita.com/u/items/1", urls)
+            self.assertLessEqual(sum(1 for u in urls if "same.example.com" in u), 2)
+        finally:
+            cc.close()
+
+        # 3. Headless JSON envelope telemetry parser (`cache_read_tokens`, `thinking_tokens`, `structured_output`)
+        env = parse_agy_json_envelope(json.dumps({
+            "status": "SUCCESS",
+            "response": '{"ok":true}',
+            "structured_output": {"ok": True},
+            "usage": {"input_tokens": 10000, "cache_read_tokens": 8000, "thinking_tokens": 500},
+        }))
+        self.assertEqual(env["structured_output"], {"ok": True})
+        self.assertEqual(env["usage"]["cache_read_tokens"], 8000)
+
+        # 4. PreToolUse auto_approve (safe REV0 single cmd only) + block chaining + App tool names
+        d_auto = evaluate_tool_call({"toolCall": {"name": "run_command", "args": {"CommandLine": "git status"}}}, paths=self.paths)
+        self.assertEqual(d_auto.decision, "auto_approve")
+        self.assertEqual(d_auto.to_hook_json(), {"decision": "auto_approve"})
+        d_chain = evaluate_tool_call({"toolCall": {"name": "run_command", "args": {"CommandLine": "git status && rm -rf /"}}}, paths=self.paths)
+        self.assertEqual(d_chain.decision, "deny")
+        d_app_sec = evaluate_tool_call(
+            {"toolCall": {"name": "write_to_file", "args": {"TargetFile": "/home/u/.mcp_secret", "CodeContent": "abc"}}},
+            paths=self.paths,
+        )
+        self.assertEqual(d_app_sec.decision, "force_ask")
+
+        # 5. Stop verification hook: 0 false positives on Q&A, bounded max 2 continues on unverified edit
+        stop_path = os.path.join(self.paths.repo_root, "adapters", "antigem", "stop_verify.py")
+        spec = importlib.util.spec_from_file_location("stop_verify", stop_path)
+        sv = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sv)
+        self.assertEqual(sv.evaluate_stop({"conversationId": "qa1", "fullyIdle": True, "terminationReason": "model_stop"}, self.paths)["decision"], "stop")
+        with open(os.path.join(self.paths.state_dir, "ed1.json"), "w", encoding="utf-8") as f:
+            json.dump({"code_edited": True, "tests_passed": False, "stop_continues": 0}, f)
+        self.assertEqual(sv.evaluate_stop({"conversationId": "ed1", "fullyIdle": True, "terminationReason": "model_stop"}, self.paths)["decision"], "continue")
+        self.assertEqual(sv.evaluate_stop({"conversationId": "ed1", "fullyIdle": True, "terminationReason": "model_stop"}, self.paths)["decision"], "continue")
+        # 3rd stop hits cap -> must allow stop (no infinite loop)
+        self.assertEqual(sv.evaluate_stop({"conversationId": "ed1", "fullyIdle": True, "terminationReason": "model_stop"}, self.paths)["decision"], "stop")
+
+        # 6. Lossless anchor updates + CodeGraph deleted-file pruning + AI_FEED auto-route
+        update_anchor_from_tool("anc1", "write_to_file", {"TargetFile": "/data/user/0/ai.antigem/files/home/a.py"}, ok=True, paths=self.paths)
+        self.assertIn("/data/user/0/ai.antigem/files/home/a.py", load_anchor("anc1", self.paths)["files_written"])
+
+        pdir = os.path.join(self.tmpdir, "prune_repo")
+        os.makedirs(pdir, exist_ok=True)
+        fp = os.path.join(pdir, "temp_mod.py")
+        with open(fp, "w", encoding="utf-8") as f:
+            f.write("def ghost_fn():\n    return 1\n")
+        cg = CodeGraph(self.paths)
+        cg.index_directory(pdir)
+        self.assertTrue(any(s["name"] == "ghost_fn" for s in cg.find_symbol("ghost_fn")))
+        os.remove(fp)
+        idx2 = cg.index_directory(pdir)
+        self.assertEqual(idx2["files_pruned"], 1)
+        self.assertEqual(cg.find_symbol("ghost_fn"), [])
+
+        self.assertTrue(any(r["intent"] == "AI_FEED" for r in classify_user_intent("check my x feed for latest ai news")))
 
     def test_full_10_mission_acceptance_suite(self):
         rep = run_suite()
