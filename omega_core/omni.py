@@ -168,52 +168,73 @@ def extract_clean_text(html_txt: str, url: str = "") -> tuple[str, str, list[str
     return title, re.sub(r"\s+", " ", " ".join(p.chunks)).strip(), links
 
 
+def _extract_response_content(raw: bytes, final_url: str, content_type: str = "") -> tuple[str, str, list[str], str]:
+    """Decode HTML or PDF bytes cleanly; reject binary noise and anti-bot gates."""
+    ct = (content_type or "").lower()
+    if raw.startswith(b"%PDF-") or "application/pdf" in ct:
+        try:
+            import io
+            from pypdf import PdfReader  # type: ignore
+
+            reader = PdfReader(io.BytesIO(raw))
+            chunks = []
+            for page in reader.pages[:12]:
+                txt = (page.extract_text() or "").strip()
+                if txt:
+                    chunks.append(txt)
+                if sum(len(c) for c in chunks) >= 12000:
+                    break
+            text = "\n\n".join(chunks).strip()
+            meta_title = ""
+            try:
+                meta_title = str((reader.metadata or {}).get("/Title") or "").strip()
+            except Exception:
+                pass
+            return (meta_title or final_url, text, [], "")
+        except Exception:
+            return ("", "", [], "pdf_parse_failed")
+    if b"\x00" in raw[:1024]:
+        return ("", "", [], "binary_skipped")
+    html_txt = raw.decode("utf-8", errors="replace")
+    if _is_gated(html_txt):
+        return ("", "", [], "gated_antibot_skipped")
+    title, text, links = extract_clean_text(html_txt, url=final_url)
+    return (title or final_url, text, links, "")
+
+
 def fetch_public_page(url: str, timeout: int = 7, client: Any | None = None) -> dict[str, Any]:
-    """Fetch a public HTTP(S) page via pooled httpx[http2] -> urllib; skips anti-bot/CAPTCHA gates honestly."""
+    """Fetch a public HTTP(S) page or PDF via pooled httpx[http2] -> urllib; skips anti-bot/binary gates honestly."""
     t0 = time.monotonic()
+
+    def _finish(raw: bytes, final_url: str, status: int, engine: str, content_type: str = "") -> dict[str, Any]:
+        title, text, links, err = _extract_response_content(raw, final_url, content_type)
+        if err:
+            return {"ok": False, "url": final_url, "status": status, "error": err}
+        return {
+            "ok": bool(len(text) > 80),
+            "engine": engine,
+            "url": final_url,
+            "status": status,
+            "title": title or final_url,
+            "text": text[:10000],
+            "links": links,
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
+            "ms": round((time.monotonic() - t0) * 1000.0, 1),
+        }
+
     try:
         if client is not None:
             r = client.get(url, timeout=timeout)
             if r.status_code >= 400:
                 return {"ok": False, "url": url, "status": r.status_code, "error": f"HTTP {r.status_code}"}
-            raw = r.content[:MAX_PAGE_BYTES]
-            html_txt = raw.decode("utf-8", errors="replace")
-            if _is_gated(html_txt):
-                return {"ok": False, "url": url, "status": r.status_code, "error": "gated_antibot_skipped"}
-            title, text, links = extract_clean_text(html_txt, url=str(r.url))
-            return {
-                "ok": bool(len(text) > 80),
-                "engine": "httpx_http2_pool",
-                "url": str(r.url),
-                "status": r.status_code,
-                "title": title or str(r.url),
-                "text": text[:10000],
-                "links": links,
-                "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
-                "ms": round((time.monotonic() - t0) * 1000.0, 1),
-            }
+            return _finish(r.content[:MAX_PAGE_BYTES], str(r.url), r.status_code, "httpx_http2_pool", r.headers.get("content-type", ""))
         import httpx  # type: ignore
 
         with httpx.Client(http2=True, follow_redirects=True, timeout=timeout, headers={"User-Agent": UA}) as cli:
             r = cli.get(url)
             if r.status_code >= 400:
                 return {"ok": False, "url": url, "status": r.status_code, "error": f"HTTP {r.status_code}"}
-            raw = r.content[:MAX_PAGE_BYTES]
-            html_txt = raw.decode("utf-8", errors="replace")
-            if _is_gated(html_txt):
-                return {"ok": False, "url": url, "status": r.status_code, "error": "gated_antibot_skipped"}
-            title, text, links = extract_clean_text(html_txt, url=str(r.url))
-            return {
-                "ok": bool(len(text) > 80),
-                "engine": "httpx_http2",
-                "url": str(r.url),
-                "status": r.status_code,
-                "title": title or str(r.url),
-                "text": text[:10000],
-                "links": links,
-                "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
-                "ms": round((time.monotonic() - t0) * 1000.0, 1),
-            }
+            return _finish(r.content[:MAX_PAGE_BYTES], str(r.url), r.status_code, "httpx_http2", r.headers.get("content-type", ""))
     except ImportError:
         pass
     except Exception as e:
@@ -223,21 +244,8 @@ def fetch_public_page(url: str, timeout: int = 7, client: Any | None = None) -> 
         req = urllib.request.Request(url, headers={"User-Agent": UA})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read(MAX_PAGE_BYTES)
-            html_txt = raw.decode("utf-8", errors="replace")
-            if _is_gated(html_txt):
-                return {"ok": False, "url": url, "status": resp.status, "error": "gated_antibot_skipped"}
-            title, text, links = extract_clean_text(html_txt, url=url)
-            return {
-                "ok": bool(len(text) > 80),
-                "engine": "urllib",
-                "url": url,
-                "status": getattr(resp, "status", 200),
-                "title": title or url,
-                "text": text[:10000],
-                "links": links,
-                "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
-                "ms": round((time.monotonic() - t0) * 1000.0, 1),
-            }
+            ct = resp.headers.get("Content-Type", "") if getattr(resp, "headers", None) else ""
+            return _finish(raw, url, getattr(resp, "status", 200), "urllib", ct)
     except Exception as e:
         return {"ok": False, "url": url, "status": 0, "error": f"{type(e).__name__}: {e}"}
 
